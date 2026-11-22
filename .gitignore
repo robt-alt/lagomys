@@ -6,6 +6,8 @@
 !/LICENSE
 !/Cargo.toml
 !/Cargo.lock
+!/.github/
+!/scripts/
 !/crates/
 
 /crates/*
