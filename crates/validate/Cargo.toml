@@ -1,0 +1,12 @@
+[package]
+name = "ops-validate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+include.workspace = true
+
+[dependencies]
+ops-spec.workspace = true
+ops-syntax.workspace = true
+ops-actions.workspace = true

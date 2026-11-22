@@ -1,0 +1,23 @@
+# Track the public README, license, workspace build files, and production sources.
+/*
+!/.gitignore
+!/.gitattributes
+!/README.md
+!/LICENSE
+!/Cargo.toml
+!/Cargo.lock
+!/crates/
+
+/crates/*
+!/crates/actions/
+!/crates/cli/
+!/crates/core-actions/
+!/crates/modules/
+!/crates/runtime/
+!/crates/spec/
+!/crates/syntax/
+!/crates/validate/
+
+/crates/*/*
+!/crates/*/Cargo.toml
+!/crates/*/src/

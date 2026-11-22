@@ -1,0 +1,17 @@
+# Source archives contain the license, workspace build files, and crate sources.
+* export-ignore
+/LICENSE -export-ignore
+/Cargo.toml -export-ignore
+/Cargo.lock -export-ignore
+/crates -export-ignore
+/crates/actions -export-ignore
+/crates/cli -export-ignore
+/crates/core-actions -export-ignore
+/crates/modules -export-ignore
+/crates/runtime -export-ignore
+/crates/spec -export-ignore
+/crates/syntax -export-ignore
+/crates/validate -export-ignore
+/crates/*/Cargo.toml -export-ignore
+/crates/*/src -export-ignore
+/crates/*/src/** -export-ignore

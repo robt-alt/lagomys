@@ -1,0 +1,17 @@
+[package]
+name = "lagomys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+include.workspace = true
+
+[dependencies]
+ops-spec.workspace = true
+ops-syntax.workspace = true
+ops-actions.workspace = true
+ops-core-actions.workspace = true
+ops-modules.workspace = true
+ops-validate.workspace = true
+ops-runtime.workspace = true
+serde_json.workspace = true
