@@ -14,7 +14,7 @@ exclude = ["fuzz"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "Apache-2.0"
 publish = false
@@ -26,14 +26,14 @@ serde_json = "1.0"
 libc = "0.2"
 curl = { version = "0.4", default-features = false }
 rustix = { version = "1.1", features = ["process"] }
-ops-spec = { version = "0.1.0", path = "crates/spec" }
-ops-syntax = { version = "0.1.0", path = "crates/syntax" }
-ops-actions = { version = "0.1.0", path = "crates/actions" }
-ops-core-actions = { version = "0.1.0", path = "crates/core-actions" }
-ops-sys = { version = "0.1.0", path = "crates/sys" }
-ops-modules = { version = "0.1.0", path = "crates/modules" }
-ops-validate = { version = "0.1.0", path = "crates/validate" }
-ops-runtime = { version = "0.1.0", path = "crates/runtime" }
+ops-spec = { version = "0.2.0", path = "crates/spec" }
+ops-syntax = { version = "0.2.0", path = "crates/syntax" }
+ops-actions = { version = "0.2.0", path = "crates/actions" }
+ops-core-actions = { version = "0.2.0", path = "crates/core-actions" }
+ops-sys = { version = "0.2.0", path = "crates/sys" }
+ops-modules = { version = "0.2.0", path = "crates/modules" }
+ops-validate = { version = "0.2.0", path = "crates/validate" }
+ops-runtime = { version = "0.2.0", path = "crates/runtime" }
 
 [profile.release]
 opt-level = "z"
