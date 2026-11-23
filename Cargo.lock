@@ -125,6 +125,8 @@ dependencies = [
  "libc",
  "ops-actions",
  "ops-spec",
+ "ops-sys",
+ "rustix",
  "serde_json",
 ]
 
@@ -165,6 +167,13 @@ version = "0.1.0"
 dependencies = [
  "ops-spec",
  "serde_json",
+]
+
+[[package]]
+name = "ops-sys"
+version = "0.1.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

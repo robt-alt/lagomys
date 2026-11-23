@@ -19,10 +19,11 @@ impl<'a> Evaluator<'a> {
         match &operand.kind {
             CheckedValue::Literal(value) => Ok(value.clone()),
             CheckedValue::Result(path) => {
-                let value = self.results.get(&path.root).ok_or_else(|| {
-                    Error::new(ErrorCode::ERef, format!("Unavailable result {}", path.root))
-                })?;
-                path.lookup(&value.value)
+                let value = self
+                    .results
+                    .get(&path.root)
+                    .map_or(&Value::Null, |entry| &entry.value);
+                path.lookup(value)
             }
             CheckedValue::Field(path) => {
                 let value = self

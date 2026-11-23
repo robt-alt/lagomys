@@ -21,6 +21,8 @@ pub(crate) enum TokenKind {
     Dot,
     Open,
     Close,
+    OpenBlock,
+    CloseBlock,
 }
 
 pub(crate) fn lex(line: &str, number: usize) -> Result<Vec<Token>, Error> {
@@ -44,6 +46,8 @@ pub(crate) fn lex(line: &str, number: usize) -> Result<Vec<Token>, Error> {
             b'.' => TokenKind::Dot,
             b'[' => TokenKind::Open,
             b']' => TokenKind::Close,
+            b'{' => TokenKind::OpenBlock,
+            b'}' => TokenKind::CloseBlock,
             b'@' => {
                 while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
                     cursor += 1;

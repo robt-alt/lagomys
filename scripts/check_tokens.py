@@ -1,4 +1,4 @@
-"""Compare canonical 0.1 scripts with the approved o200k_base budgets."""
+"""Compare the canonical scripts with the approved o200k_base budgets."""
 
 from pathlib import Path
 import re

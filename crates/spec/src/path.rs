@@ -79,6 +79,7 @@ pub fn is_name(value: &str) -> bool {
 
 pub fn truthy(value: &Value) -> bool {
     match value {
+        Value::Null => false,
         Value::Bool(value) => *value,
         Value::Number(value) => value.as_f64().is_some_and(|number| number != 0.0),
         Value::String(value) => !value.is_empty(),

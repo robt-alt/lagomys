@@ -3,14 +3,14 @@
 mod expression;
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     time::{Duration, Instant},
 };
 
 use ops_actions::ActionContext;
 use ops_spec::{
-    Argument, Assertion, Error, ErrorCode, ObservedValue, RunResult, Status, Task, Value,
-    MAX_DATA_BYTES,
+    Argument, Assertion, Error, ErrorCode, LoopContext, ObservedValue, RepeatReason, RepeatResult,
+    RunResult, Status, Task, Value, MAX_DATA_BYTES,
 };
 use ops_validate::{CheckedInstruction, CheckedOperand, CheckedValue, Step, ValidatedPlan};
 use serde::Serialize;
@@ -42,26 +42,21 @@ pub fn execute_from(plan: &ValidatedPlan<'_>, started: Instant) -> RunResult {
         values: BTreeMap::new(),
         stored_bytes: 0,
         payload_bytes: 0,
+        evidence_names: Vec::new(),
+        declared_evidence: BTreeSet::new(),
     };
-    for step in plan.steps() {
-        match run.step(step) {
-            Ok(Some(value)) => {
-                if let Some(destination) = &step.destination {
-                    if let Err(error) = run.save(destination, value) {
-                        run.result.fail(error.at(step.line));
-                        break;
-                    }
-                }
-            }
-            Ok(None) => break,
-            Err(error) => {
-                if let Some(path) = &error.path {
-                    run.result
-                        .evidence
-                        .push(json!({"line": step.line, "path": path}));
-                }
-                run.result.fail(error.at(step.line));
-                break;
+    if let Err(error) = run.block(plan.steps()) {
+        if let Some(path) = &error.path {
+            run.result
+                .evidence
+                .push(json!({"line": error.line, "path": path}));
+        }
+        run.result.fail(error);
+    }
+    if run.result.status != Status::Success {
+        for name in run.evidence_names {
+            if let Some(entry) = run.values.remove(name) {
+                run.result.evidence.push(entry.value);
             }
         }
     }
@@ -73,6 +68,7 @@ struct Stored {
     value: Value,
     task: Option<Task>,
     bytes: usize,
+    collector: bool,
 }
 
 impl Stored {
@@ -81,6 +77,7 @@ impl Stored {
             value,
             task: None,
             bytes: 0,
+            collector: false,
         }
     }
 }
@@ -92,11 +89,39 @@ struct Execution<'a, 'plan> {
     values: BTreeMap<String, Stored>,
     stored_bytes: usize,
     payload_bytes: usize,
+    evidence_names: Vec<&'a str>,
+    declared_evidence: BTreeSet<&'a str>,
 }
 
-impl Execution<'_, '_> {
-    fn step(&mut self, step: &Step) -> Result<Option<Stored>, Error> {
-        self.check_time()?;
+#[derive(PartialEq, Eq)]
+enum Flow {
+    Next,
+    Break,
+    Continue,
+    Stop,
+}
+
+impl<'a> Execution<'a, '_> {
+    fn block(&mut self, steps: &'a [Step]) -> Result<Flow, Error> {
+        for step in steps {
+            let flow = self.step(step).map_err(|error| {
+                if error.line.is_some() {
+                    error
+                } else {
+                    error.at(step.line)
+                }
+            })?;
+            if flow != Flow::Next {
+                return Ok(flow);
+            }
+        }
+        Ok(Flow::Next)
+    }
+
+    fn step(&mut self, step: &'a Step) -> Result<Flow, Error> {
+        if !matches!(step.instruction, CheckedInstruction::Delay(_)) {
+            self.check_time()?;
+        }
         let result = match &step.instruction {
             CheckedInstruction::Call { name, arguments } => self.call(name, arguments)?,
             CheckedInstruction::Where { source, predicate } => {
@@ -117,9 +142,13 @@ impl Execution<'_, '_> {
             }
             CheckedInstruction::Wait { source, seconds } => {
                 if let Some(task) = self.task(source) {
-                    return self.wait(task, *seconds);
+                    match self.wait(task, *seconds)? {
+                        Some(value) => value,
+                        None => return Ok(Flow::Stop),
+                    }
+                } else {
+                    Stored::value(self.value(source)?)
                 }
-                Stored::value(self.value(source)?)
             }
             CheckedInstruction::Assert { predicate, text } => {
                 let passed = Evaluator::new(&self.values, None).evaluate(predicate)?;
@@ -138,22 +167,128 @@ impl Execution<'_, '_> {
                 Stored::value(json!({"expr": text, "passed": passed}))
             }
             CheckedInstruction::Out(operands) => {
-                let mut values = Vec::new();
-                for operand in operands {
-                    let output = ObservedValue {
-                        expr: operand.text.clone(),
-                        value: self.value(operand)?,
-                    };
-                    self.account(&output)?;
-                    if step.destination.is_some() {
-                        values.push(output.value.clone());
-                    }
-                    self.result.values.push(output);
+                self.output(operands, step.destination.is_some())?
+            }
+            CheckedInstruction::Return(operands) => {
+                self.output(operands, false)?;
+                return Ok(Flow::Stop);
+            }
+            CheckedInstruction::Repeat {
+                count,
+                context,
+                body,
+                introduced,
+            } => {
+                for name in introduced {
+                    self.discard(name);
                 }
-                Stored::value(Value::Array(values))
+                let outcome = self.repeat(*count, context.as_deref(), body);
+                if let Some(name) = context {
+                    self.discard(name);
+                }
+                let Some(result) = outcome? else {
+                    return Ok(Flow::Stop);
+                };
+                if step.destination.is_none() {
+                    return Ok(Flow::Next);
+                }
+                Stored::value(json!(result))
+            }
+            CheckedInstruction::If {
+                predicate,
+                then_body,
+                else_body,
+                introduced,
+            } => {
+                let matched = Evaluator::new(&self.values, None).evaluate(predicate)?;
+                for name in introduced {
+                    self.discard(name);
+                }
+                return self.block(if matched { then_body } else { else_body });
+            }
+            CheckedInstruction::Break => return Ok(Flow::Break),
+            CheckedInstruction::Continue => return Ok(Flow::Continue),
+            CheckedInstruction::Delay(milliseconds) => {
+                let remaining = self.deadline.saturating_duration_since(Instant::now());
+                std::thread::sleep(Duration::from_millis(*milliseconds).min(remaining));
+                if Instant::now() >= self.deadline {
+                    if self.result.status != Status::Failed {
+                        self.result.status = Status::Timeout;
+                    }
+                    return Ok(Flow::Stop);
+                }
+                return Ok(Flow::Next);
+            }
+            CheckedInstruction::NewCollector => Stored {
+                collector: true,
+                ..Stored::value(Value::Array(Vec::new()))
+            },
+            CheckedInstruction::Collect { name, value } => {
+                let value = self.value(value)?;
+                self.append(name, value)?;
+                return Ok(Flow::Next);
+            }
+            CheckedInstruction::Evidence(names) => {
+                for name in names {
+                    if self.declared_evidence.insert(name) {
+                        self.evidence_names.push(name);
+                    }
+                }
+                return Ok(Flow::Next);
             }
         };
-        Ok(Some(result))
+        if let Some(destination) = &step.destination {
+            self.save(destination, result)?;
+        }
+        Ok(Flow::Next)
+    }
+
+    fn repeat(
+        &mut self,
+        count: u64,
+        context: Option<&str>,
+        body: &'a [Step],
+    ) -> Result<Option<RepeatResult>, Error> {
+        for index in 0..count {
+            self.check_time()?;
+            if let Some(name) = context {
+                let current = LoopContext {
+                    index,
+                    last: index + 1 == count,
+                };
+                self.save(name, Stored::value(json!(current)))?;
+            }
+            match self.block(body)? {
+                Flow::Next | Flow::Continue => {}
+                Flow::Break => {
+                    return Ok(Some(RepeatResult {
+                        iterations: index + 1,
+                        reason: RepeatReason::Break,
+                    }))
+                }
+                Flow::Stop => return Ok(None),
+            }
+        }
+        Ok(Some(RepeatResult {
+            iterations: count,
+            reason: RepeatReason::Completed,
+        }))
+    }
+
+    fn output(&mut self, operands: &[CheckedOperand], assigned: bool) -> Result<Stored, Error> {
+        let mut values = Vec::new();
+        for operand in operands {
+            let output = ObservedValue {
+                expr: operand.text.clone(),
+                value: self.value(operand)?,
+            };
+            self.account(&output)?;
+            if assigned {
+                values.push(output.value.clone());
+            }
+            self.result.values.push(output);
+        }
+        Ok(Stored::value(Value::Array(values)))
     }
 
     fn call(&mut self, name: &str, operands: &[CheckedOperand]) -> Result<Stored, Error> {
@@ -199,6 +334,7 @@ impl Execution<'_, '_> {
             value: json!(task),
             task: Some(task),
             bytes: 0,
+            collector: false,
         })
     }
 
@@ -327,16 +463,48 @@ impl Execution<'_, '_> {
             .stored_bytes
             .saturating_sub(previous)
             .saturating_add(value.bytes);
-        if total > MAX_STORED_BYTES {
-            return Err(Error::new(
-                ErrorCode::EBudget,
-                "Stored values exceed the runtime data limit",
-            ));
-        }
+        check_storage(total)?;
         self.stored_bytes = total;
         self.values.insert(destination.to_owned(), value);
         Ok(())
     }
+
+    fn discard(&mut self, name: &str) {
+        if let Some(entry) = self.values.remove(name) {
+            self.stored_bytes -= entry.bytes;
+        }
+    }
+
+    fn append(&mut self, name: &str, value: Value) -> Result<(), Error> {
+        let entry = self.values.get_mut(name).ok_or_else(|| {
+            Error::new(
+                ErrorCode::ERef,
+                format!("Collector {name} has not been created"),
+            )
+        })?;
+        let elements = entry
+            .value
+            .as_array_mut()
+            .filter(|_| entry.collector)
+            .ok_or_else(|| Error::new(ErrorCode::EArgType, format!("{name} is not a collector")))?;
+        let added = json_size(&value)?.saturating_add(usize::from(!elements.is_empty()));
+        let total = self.stored_bytes.saturating_add(added);
+        check_storage(total)?;
+        elements.push(value);
+        entry.bytes += added;
+        self.stored_bytes = total;
+        Ok(())
+    }
+}
+
+fn check_storage(total: usize) -> Result<(), Error> {
+    if total > MAX_STORED_BYTES {
+        return Err(Error::new(
+            ErrorCode::EBudget,
+            "Stored values exceed the runtime data limit",
+        ));
+    }
+    Ok(())
 }
 
 fn into_list(value: Value) -> Result<Vec<Value>, Error> {

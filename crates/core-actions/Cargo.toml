@@ -11,3 +11,9 @@ ops-spec.workspace = true
 ops-actions.workspace = true
 libc.workspace = true
 serde_json.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { workspace = true, features = ["param"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+ops-sys.workspace = true

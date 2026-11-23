@@ -4,6 +4,7 @@ members = [
     "crates/syntax",
     "crates/actions",
     "crates/core-actions",
+    "crates/sys",
     "crates/modules",
     "crates/validate",
     "crates/runtime",
@@ -29,6 +30,7 @@ ops-spec = { version = "0.1.0", path = "crates/spec" }
 ops-syntax = { version = "0.1.0", path = "crates/syntax" }
 ops-actions = { version = "0.1.0", path = "crates/actions" }
 ops-core-actions = { version = "0.1.0", path = "crates/core-actions" }
+ops-sys = { version = "0.1.0", path = "crates/sys" }
 ops-modules = { version = "0.1.0", path = "crates/modules" }
 ops-validate = { version = "0.1.0", path = "crates/validate" }
 ops-runtime = { version = "0.1.0", path = "crates/runtime" }

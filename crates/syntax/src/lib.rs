@@ -43,6 +43,22 @@ pub enum Instruction {
         text: String,
     },
     Out(Vec<Operand>),
+    Repeat {
+        count: Operand,
+        context: Option<String>,
+        body: Vec<Statement>,
+    },
+    If {
+        predicate: Expression,
+        then_body: Vec<Statement>,
+        else_body: Vec<Statement>,
+    },
+    Break,
+    Continue,
+    Return(Vec<Operand>),
+    Delay(Operand),
+    Collect(Vec<Operand>),
+    Evidence(Vec<String>),
     Unknown(String),
 }
 
@@ -87,37 +103,62 @@ pub fn parse(text: &str) -> Result<Script, Error> {
                 .column(1),
         );
     }
-    let mut statements = Vec::new();
+    let mut lines = Vec::new();
     for (index, line) in text.split('\n').enumerate() {
         let number = index + 1;
         let tokens = lexer::lex(line, number)?;
         if !tokens.is_empty() {
-            statements.push(
-                LineParser {
-                    source: line,
-                    tokens,
-                    at: 0,
-                    line: number,
-                }
-                .statement()?,
-            );
+            lines.push(Line {
+                source: line,
+                tokens,
+                number,
+            });
         }
+    }
+    let mut lines = lines.into_iter().peekable();
+    let mut statements = Vec::new();
+    while let Some(line) = lines.next() {
+        statements.push(line.parser().statement(&mut lines, 0, false)?);
     }
     Ok(Script { statements })
 }
 
-struct LineParser<'a> {
+struct Line<'a> {
     source: &'a str,
     tokens: Vec<Token>,
+    number: usize,
+}
+
+impl Line<'_> {
+    fn parser(&self) -> LineParser<'_> {
+        LineParser {
+            source: self.source,
+            tokens: &self.tokens,
+            at: 0,
+            line: self.number,
+        }
+    }
+}
+
+type Lines<'a> = std::iter::Peekable<std::vec::IntoIter<Line<'a>>>;
+
+struct LineParser<'a> {
+    source: &'a str,
+    tokens: &'a [Token],
     at: usize,
     line: usize,
 }
 
 impl LineParser<'_> {
-    fn statement(mut self) -> Result<Statement, Error> {
+    fn statement(
+        mut self,
+        lines: &mut Lines<'_>,
+        depth: usize,
+        inline: bool,
+    ) -> Result<Statement, Error> {
         let first = self.word("Expected an instruction name or result name")?;
         let (destination, name) = if self.consume(&TokenKind::Assign) {
-            if matches!(first.as_str(), "and" | "or" | "not") {
+            if reserved_name(&first) {
                 return Err(self.error("Invalid result name"));
             }
             (Some(first), self.word("Expected an instruction after =")?)
@@ -145,11 +186,85 @@ impl LineParser<'_> {
                 let text = self.source[start..self.end()].to_owned();
                 Instruction::Assert { predicate, text }
             }
-            "out" => {
+            "out" | "return" => {
                 if self.at == self.tokens.len() {
-                    return Err(self.error("out requires at least one value"));
+                    return Err(self.error(&format!("{name} requires at least one value")));
                 }
-                Instruction::Out(self.arguments()?)
+                let values = self.arguments()?;
+                if name == "return" {
+                    Instruction::Return(values)
+                } else {
+                    Instruction::Out(values)
+                }
+            }
+            "repeat" | "if" if inline => {
+                return Err(self.error("A single-line block cannot contain another block"));
+            }
+            "repeat" => {
+                self.space()?;
+                let count = self.operand()?;
+                let context = if matches!(
+                    self.tokens.get(self.at).map(|token| &token.kind),
+                    Some(TokenKind::Word(_))
+                ) {
+                    self.space()?;
+                    let name = self.word("Expected a loop context name")?;
+                    if reserved_name(&name) {
+                        return Err(self.error("Invalid loop context name"));
+                    }
+                    Some(name)
+                } else {
+                    None
+                };
+                let body = self.block(lines, depth, false)?;
+                Instruction::Repeat {
+                    count,
+                    context,
+                    body,
+                }
+            }
+            "if" => {
+                self.space()?;
+                let predicate = self.expression()?;
+                let then_body = self.block(lines, depth, false)?;
+                let else_body = if self.consume_word("else") {
+                    self.block(lines, depth, true)?
+                } else if lines.peek().is_some_and(|line| {
+                    matches!(line.tokens.first().map(|token| &token.kind),
+                        Some(TokenKind::Word(word)) if word == "else")
+                }) {
+                    let line = lines
+                        .next()
+                        .ok_or_else(|| self.error("Expected else block"))?;
+                    let mut parser = line.parser();
+                    parser.at = 1;
+                    let body = parser.block(lines, depth, false)?;
+                    parser.finish()?;
+                    body
+                } else {
+                    Vec::new()
+                };
+                Instruction::If {
+                    predicate,
+                    then_body,
+                    else_body,
+                }
+            }
+            "else" => return Err(self.error("else requires a preceding if block")),
+            "break" => Instruction::Break,
+            "continue" => Instruction::Continue,
+            "delay" => {
+                self.space()?;
+                Instruction::Delay(self.operand()?)
+            }
+            "collect" => Instruction::Collect(self.arguments()?),
+            "evidence" => {
+                let mut names = Vec::new();
+                while self.at < self.tokens.len() {
+                    self.space()?;
+                    names.push(self.word("Expected a result name")?);
+                }
+                Instruction::Evidence(names)
             }
             _ => {
                 return Ok(Statement {
@@ -159,14 +274,66 @@ impl LineParser<'_> {
                 })
             }
         };
-        if self.at < self.tokens.len() {
-            return Err(self.error("Unexpected token after instruction"));
-        }
+        self.finish()?;
         Ok(Statement {
             line: self.line,
             destination,
             instruction,
         })
+    }
+
+    fn block(
+        &mut self,
+        lines: &mut Lines<'_>,
+        depth: usize,
+        same_line_else: bool,
+    ) -> Result<Vec<Statement>, Error> {
+        self.expect(&TokenKind::OpenBlock, "Expected { to start a block")?;
+        if depth >= MAX_DEPTH {
+            return Err(self.error("Block nesting exceeds the limit"));
+        }
+        if self.at < self.tokens.len() {
+            let start = self.at;
+            while let Some(token) = self.tokens.get(self.at) {
+                match token.kind {
+                    TokenKind::CloseBlock => {
+                        let body = LineParser {
+                            tokens: &self.tokens[start..self.at],
+                            at: 0,
+                            ..*self
+                        }
+                        .statement(lines, depth + 1, true)?;
+                        self.at += 1;
+                        return Ok(vec![body]);
+                    }
+                    TokenKind::OpenBlock => {
+                        return Err(self.error("A single-line block cannot contain another block"));
+                    }
+                    _ => self.at += 1,
+                }
+            }
+            return Err(self.error("Expected } to close a single-line block"));
+        }
+        if same_line_else {
+            return Err(self.error("A same-line else requires a single-line block"));
+        }
+        let mut body = Vec::new();
+        while let Some(line) = lines.next() {
+            let mut parser = line.parser();
+            if parser.consume(&TokenKind::CloseBlock) {
+                parser.finish()?;
+                return Ok(body);
+            }
+            body.push(parser.statement(lines, depth + 1, false)?);
+        }
+        Err(self.error("Expected } to close the block"))
+    }
+
+    fn finish(&self) -> Result<(), Error> {
+        if self.at < self.tokens.len() {
+            return Err(self.error("Unexpected token after instruction"));
+        }
+        Ok(())
     }
 
     fn call(&mut self) -> Result<Instruction, Error> {
@@ -401,4 +568,22 @@ impl LineParser<'_> {
             .at(self.line)
             .column(column)
     }
+}
+
+fn reserved_name(name: &str) -> bool {
+    matches!(
+        name,
+        "and"
+            | "or"
+            | "not"
+            | "repeat"
+            | "if"
+            | "else"
+            | "break"
+            | "continue"
+            | "return"
+            | "delay"
+            | "collect"
+            | "evidence"
+    )
 }

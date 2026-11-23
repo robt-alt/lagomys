@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use crate::{Error, ErrorCode, Value, VERSION};
+use crate::{Error, ErrorCode, Type, Value, VERSION};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -28,6 +28,51 @@ pub struct ObservedValue {
 pub struct Assertion {
     pub expr: String,
     pub passed: bool,
+}
+
+#[derive(Serialize)]
+pub struct LoopContext {
+    pub index: u64,
+    pub last: bool,
+}
+
+impl LoopContext {
+    pub fn value_type() -> Type {
+        Type::Record(
+            [
+                ("index".to_owned(), Type::Integer),
+                ("last".to_owned(), Type::Bool),
+            ]
+            .into_iter()
+            .collect(),
+        )
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepeatReason {
+    Completed,
+    Break,
+}
+
+#[derive(Serialize)]
+pub struct RepeatResult {
+    pub iterations: u64,
+    pub reason: RepeatReason,
+}
+
+impl RepeatResult {
+    pub fn value_type() -> Type {
+        Type::Record(
+            [
+                ("iterations".to_owned(), Type::Integer),
+                ("reason".to_owned(), Type::String),
+            ]
+            .into_iter()
+            .collect(),
+        )
+    }
 }
 
 #[derive(Debug, Default, Serialize)]

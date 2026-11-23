@@ -11,7 +11,10 @@
 /crates/runtime -export-ignore
 /crates/spec -export-ignore
 /crates/syntax -export-ignore
+/crates/sys -export-ignore
 /crates/validate -export-ignore
 /crates/*/Cargo.toml -export-ignore
 /crates/*/src -export-ignore
 /crates/*/src/** -export-ignore
+/crates/sys/Cargo.toml -export-ignore
+/crates/sys/src/** -export-ignore

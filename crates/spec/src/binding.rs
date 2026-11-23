@@ -58,6 +58,7 @@ pub enum TargetKind {
     Dir,
     Process,
     Host,
+    Local,
 }
 
 impl TargetKind {
@@ -67,6 +68,7 @@ impl TargetKind {
             Self::Dir => "dir",
             Self::Process => "process",
             Self::Host => "host",
+            Self::Local => "local",
         }
     }
 }
@@ -78,6 +80,7 @@ pub enum Target {
     Dir { path: PathBuf },
     Process { process: Process },
     Host { host: String },
+    Local {},
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -94,6 +97,7 @@ impl Target {
             Self::Dir { .. } => TargetKind::Dir,
             Self::Process { .. } => TargetKind::Process,
             Self::Host { .. } => TargetKind::Host,
+            Self::Local {} => TargetKind::Local,
         }
     }
 
@@ -109,6 +113,7 @@ impl Target {
                 process: Process::Name(name),
             }
             | Self::Host { host: name } => Value::String(name.clone()),
+            Self::Local {} => Value::Null,
         }
     }
 }

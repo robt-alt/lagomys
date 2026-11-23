@@ -1,7 +1,9 @@
 #![forbid(unsafe_code)]
 
+mod aggregate;
 mod network;
 mod process;
+mod sample;
 
 use std::{
     collections::BTreeMap,
@@ -75,6 +77,74 @@ impl CoreActions {
                     ("error", Type::OneOf(vec![Type::Null, Type::String])),
                 ]),
             ),
+            signature(
+                "sys.sample",
+                vec![
+                    Parameter::target("local", TargetKind::Local),
+                    Parameter::value(
+                        "limit",
+                        Type::Count {
+                            minimum: 1,
+                            maximum: 32,
+                        },
+                        true,
+                    ),
+                ],
+                record([
+                    ("sample_ms", Type::Number),
+                    (
+                        "machine",
+                        record([
+                            ("cpu_pct", Type::Number),
+                            ("memory_total_bytes", Type::Integer),
+                            ("memory_available_bytes", Type::Integer),
+                        ]),
+                    ),
+                    (
+                        "cpu",
+                        list_record([
+                            ("pid", Type::Integer),
+                            ("process_key", Type::String),
+                            ("name", Type::String),
+                            ("cpu_pct", Type::Number),
+                        ]),
+                    ),
+                    (
+                        "memory",
+                        list_record([
+                            ("pid", Type::Integer),
+                            ("process_key", Type::String),
+                            ("name", Type::String),
+                            ("bytes", Type::Integer),
+                        ]),
+                    ),
+                    ("memory_basis", Type::String),
+                ]),
+            ),
+            signature(
+                "data.stats",
+                vec![Parameter::value(
+                    "values",
+                    Type::List(Box::new(aggregate::observation_type())),
+                    true,
+                )],
+                record(aggregate::stat_fields()),
+            ),
+            signature(
+                "data.group_stats",
+                vec![
+                    Parameter::value(
+                        "rounds",
+                        Type::List(Box::new(Type::List(Box::new(Type::Any)))),
+                        true,
+                    ),
+                    Parameter::value("key_field", Type::String, true),
+                    Parameter::value("value_field", Type::String, true),
+                ],
+                Type::List(Box::new(record(
+                    std::iter::once(("key", Type::Any)).chain(aggregate::stat_fields()),
+                ))),
+            ),
         ];
         Self(actions)
     }
@@ -136,6 +206,28 @@ impl ActionProvider for CoreActions {
                     .unwrap_or(3000);
                 network::probe(host, port, timeout, context)
             }
+            ("sys.sample", Some(Argument::Target(Target::Local {}))) => {
+                let limit = arguments
+                    .get(1)
+                    .and_then(|argument| argument.value().as_u64())
+                    .and_then(|value| usize::try_from(value).ok())
+                    .ok_or_else(|| {
+                        Error::new(ErrorCode::EArgType, "sys.sample requires an integer limit")
+                    })?;
+                sample::sample(limit, context)
+            }
+            ("data.stats", Some(Argument::Value(values))) => aggregate::stats(values, context),
+            ("data.group_stats", Some(Argument::Value(rounds))) => {
+                let (Some(Argument::Value(key)), Some(Argument::Value(value))) =
+                    (arguments.get(1), arguments.get(2))
+                else {
+                    return Err(Error::new(
+                        ErrorCode::EArgType,
+                        "group_stats requires two field names",
+                    ));
+                };
+                aggregate::group_stats(rounds, key, value, context)
+            }
             _ => Err(Error::new(
                 ErrorCode::ETargetType,
                 format!("Invalid target for {action}"),
@@ -153,7 +245,7 @@ fn signature(name: &str, parameters: Vec<Parameter>, output: Type) -> ActionSign
     }
 }
 
-fn record<const N: usize>(fields: [(&str, Type); N]) -> Type {
+fn record<'a>(fields: impl IntoIterator<Item = (&'a str, Type)>) -> Type {
     Type::Record(
         fields
             .into_iter()
