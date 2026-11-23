@@ -10,6 +10,16 @@ lagomys 是一门面向 AI 助手的运维与测试脚本语言。助手可以�
 
 当前规范版本为 0.3。运行器使用 Rust，构建目标为 Linux x86_64、Linux arm64 和 macOS arm64。
 
+## 安装
+
+一条命令安装最新发布版（自动判断平台、校验 SHA256、装进 `~/.local/bin`，重跑即升级，无需 sudo）：
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/robt-alt/lagomys/main/scripts/install.sh | sh
+```
+
+Linux 运行依赖系统的 `libcurl4`。钉版本安装设 `LAGOMYS_VERSION`（如 `v0.2.0`）；发布版的规范版本以 Releases 为准。从源码构建见下方快速体验。
+
 ## 快速体验
 
 在项目根目录构建。Linux 构建需要 `pkg-config` 和 libcurl 开发包。
