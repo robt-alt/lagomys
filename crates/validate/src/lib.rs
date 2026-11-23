@@ -130,6 +130,25 @@ pub fn validate<'a>(
             ));
         }
     }
+    for expansion in &script.macro_expansions {
+        if !expansion.capture_assigned {
+            return Err(Error::new(
+                ErrorCode::ERef,
+                format!(
+                    "Sampling macro body does not assign {}",
+                    expansion.capture_name
+                ),
+            )
+            .at(expansion.line));
+        }
+        if let Some(&line) = script.definitions.get(&expansion.items_name) {
+            return Err(Error::new(
+                ErrorCode::ERef,
+                format!("Sampling macro reserves {}", expansion.items_name),
+            )
+            .at(line));
+        }
+    }
     let (steps, _) =
         Validator { binding, registry }.block(script.statements, &mut Scope::default(), false)?;
     Ok(ValidatedPlan {

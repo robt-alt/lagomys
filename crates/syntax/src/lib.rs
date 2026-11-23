@@ -2,6 +2,8 @@
 
 mod lexer;
 
+use std::collections::BTreeMap;
+
 use lexer::{Token, TokenKind};
 use ops_spec::{Error, ErrorCode, Path, Segment, Value};
 
@@ -11,6 +13,16 @@ const MAX_DEPTH: usize = 64;
 #[derive(Debug)]
 pub struct Script {
     pub statements: Vec<Statement>,
+    pub macro_expansions: Vec<MacroExpansion>,
+    pub definitions: BTreeMap<String, usize>,
+}
+
+#[derive(Debug)]
+pub struct MacroExpansion {
+    pub line: usize,
+    pub items_name: String,
+    pub capture_name: String,
+    pub capture_assigned: bool,
 }
 
 #[derive(Debug)]
@@ -115,12 +127,21 @@ pub fn parse(text: &str) -> Result<Script, Error> {
             });
         }
     }
-    let mut lines = lines.into_iter().peekable();
+    let mut parser = ProgramParser {
+        lines: lines.into_iter().peekable(),
+        macro_expansions: Vec::new(),
+        definitions: BTreeMap::new(),
+    };
     let mut statements = Vec::new();
-    while let Some(line) = lines.next() {
-        statements.push(line.parser().statement(&mut lines, 0, false)?);
+    while let Some(line) = parser.lines.next() {
+        line.parser()
+            .statement(&mut parser, 0, StatementKind::Plain, &mut statements)?;
     }
-    Ok(Script { statements })
+    Ok(Script {
+        statements,
+        macro_expansions: parser.macro_expansions,
+        definitions: parser.definitions,
+    })
 }
 
 struct Line<'a> {
@@ -142,11 +163,25 @@ impl Line<'_> {
 
 type Lines<'a> = std::iter::Peekable<std::vec::IntoIter<Line<'a>>>;
 
+struct ProgramParser<'a> {
+    lines: Lines<'a>,
+    macro_expansions: Vec<MacroExpansion>,
+    definitions: BTreeMap<String, usize>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StatementKind {
+    Plain,
+    Inline,
+    MacroBody,
+}
+
 #[derive(PartialEq, Eq)]
 enum BlockKind {
     Plain,
     IfThen,
     ElseAfterInlineThen,
+    MacroBody,
 }
 
 struct ParsedBlock {
@@ -164,10 +199,19 @@ struct LineParser<'a> {
 impl LineParser<'_> {
     fn statement(
         mut self,
-        lines: &mut Lines<'_>,
+        parser: &mut ProgramParser<'_>,
         depth: usize,
-        inline: bool,
-    ) -> Result<Statement, Error> {
+        kind: StatementKind,
+        statements: &mut Vec<Statement>,
+    ) -> Result<(), Error> {
+        if kind == StatementKind::MacroBody {
+            if let Some(brace) = self.tokens.iter().position(|token| {
+                matches!(token.kind, TokenKind::OpenBlock | TokenKind::CloseBlock)
+            }) {
+                self.at = brace;
+                return Err(self.error("A sampling macro body cannot contain a block"));
+            }
+        }
         let first = self.word("Expected an instruction name or result name")?;
         let (destination, name) = if self.consume(&TokenKind::Assign) {
             if reserved_name(&first) {
@@ -177,6 +221,20 @@ impl LineParser<'_> {
         } else {
             (None, first)
         };
+        if kind == StatementKind::MacroBody {
+            if matches!(
+                name.as_str(),
+                "break" | "continue" | "return" | "repeat" | "if"
+            ) {
+                return Err(self.error("Control flow is forbidden in a sampling macro body"));
+            }
+            if destination.is_none() {
+                return Err(self.error("A sampling macro body requires assignment instructions"));
+            }
+        }
+        if let Some(name) = &destination {
+            parser.definitions.entry(name.clone()).or_insert(self.line);
+        }
 
         let instruction = match name.as_str() {
             "call" => self.call()?,
@@ -209,12 +267,18 @@ impl LineParser<'_> {
                     Instruction::Out(values)
                 }
             }
-            "repeat" | "if" if inline => {
+            "repeat" | "if" if kind == StatementKind::Inline => {
                 return Err(self.error("A single-line block cannot contain another block"));
             }
             "repeat" => {
                 self.space()?;
                 let count = self.operand()?;
+                if matches!(
+                    self.tokens.get(self.at).map(|token| &token.kind),
+                    Some(TokenKind::Literal(Value::Number(_)))
+                ) {
+                    return self.sampling_macro(parser, depth, count, destination, statements);
+                }
                 let context = if matches!(
                     self.tokens.get(self.at).map(|token| &token.kind),
                     Some(TokenKind::Word(_))
@@ -224,11 +288,12 @@ impl LineParser<'_> {
                     if reserved_name(&name) {
                         return Err(self.error("Invalid loop context name"));
                     }
+                    parser.definitions.entry(name.clone()).or_insert(self.line);
                     Some(name)
                 } else {
                     None
                 };
-                let body = self.block(lines, depth, BlockKind::Plain)?.body;
+                let body = self.block(parser, depth, BlockKind::Plain)?.body;
                 Instruction::Repeat {
                     count,
                     context,
@@ -238,18 +303,20 @@ impl LineParser<'_> {
             "if" => {
                 self.space()?;
                 let predicate = self.expression()?;
-                let then_block = self.block(lines, depth, BlockKind::IfThen)?;
+                let then_block = self.block(parser, depth, BlockKind::IfThen)?;
                 let else_body = if let Some(body) = then_block.continued_else {
                     body
                 } else if self.consume_word("else") {
-                    self.block(lines, depth, BlockKind::ElseAfterInlineThen)?
+                    self.block(parser, depth, BlockKind::ElseAfterInlineThen)?
                         .body
-                } else if let Some(line) = lines.next_if(|line| line.parser().consume_word("else"))
+                } else if let Some(line) = parser
+                    .lines
+                    .next_if(|line| line.parser().consume_word("else"))
                 {
-                    let mut parser = line.parser();
-                    parser.at = 1;
-                    let body = parser.block(lines, depth, BlockKind::Plain)?.body;
-                    parser.finish()?;
+                    let mut else_parser = line.parser();
+                    else_parser.at = 1;
+                    let body = else_parser.block(parser, depth, BlockKind::Plain)?.body;
+                    else_parser.finish()?;
                     body
                 } else {
                     Vec::new()
@@ -277,24 +344,139 @@ impl LineParser<'_> {
                 Instruction::Evidence(names)
             }
             _ => {
-                return Ok(Statement {
+                statements.push(Statement {
                     line: self.line,
                     destination,
                     instruction: Instruction::Unknown(name),
-                })
+                });
+                return Ok(());
             }
         };
         self.finish()?;
-        Ok(Statement {
+        statements.push(Statement {
             line: self.line,
             destination,
             instruction,
-        })
+        });
+        Ok(())
+    }
+
+    fn sampling_macro(
+        &mut self,
+        parser: &mut ProgramParser<'_>,
+        depth: usize,
+        count: Operand,
+        destination: Option<String>,
+        statements: &mut Vec<Statement>,
+    ) -> Result<(), Error> {
+        let name =
+            destination.ok_or_else(|| self.error("A sampling macro requires a result name"))?;
+        if !matches!(
+            &count.kind,
+            OperandKind::Literal(Value::Number(number)) if number.is_i64() || number.is_u64()
+        ) {
+            return Err(Error::new(
+                ErrorCode::EParse,
+                "A sampling macro requires an integer count",
+            )
+            .at(self.line)
+            .column(count.column));
+        }
+        self.space()?;
+        let gap_column = self
+            .tokens
+            .get(self.at)
+            .map_or(self.source.len(), |token| token.start)
+            + 1;
+        let gap = self.unsigned("A sampling macro requires a nonnegative integer delay")?;
+        self.space()?;
+        let capture_column = self
+            .tokens
+            .get(self.at)
+            .map_or(self.source.len(), |token| token.start)
+            + 1;
+        let capture = self.word("Expected a sampling macro capture name")?;
+        if reserved_name(&capture) {
+            return Err(self.error("Invalid sampling macro capture name"));
+        }
+        let until = if self.consume_word("until") {
+            self.space()?;
+            Some(self.expression()?)
+        } else {
+            None
+        };
+        // The expanded repeat contains an additional level for its generated if blocks.
+        if depth + 1 >= MAX_DEPTH {
+            return Err(self.error("Expanded sampling macro exceeds the block nesting limit"));
+        }
+        let mut body = self.block(parser, depth, BlockKind::MacroBody)?.body;
+        self.finish()?;
+
+        let items_name = format!("{name}_items");
+        let capture_assigned = body
+            .iter()
+            .any(|statement| statement.destination.as_deref() == Some(capture.as_str()));
+        let generated = |instruction| Statement {
+            line: self.line,
+            destination: None,
+            instruction,
+        };
+        body.push(generated(Instruction::Collect(vec![
+            reference_operand(items_name.clone(), capture_column),
+            reference_operand(capture.clone(), capture_column),
+        ])));
+        if let Some(predicate) = until {
+            body.push(generated(Instruction::If {
+                predicate,
+                then_body: vec![generated(Instruction::Break)],
+                else_body: Vec::new(),
+            }));
+        }
+        let last = Operand {
+            kind: OperandKind::Reference(Path {
+                root: "i".to_owned(),
+                segments: vec![Segment::Field("last".to_owned())],
+            }),
+            text: "i.last".to_owned(),
+            column: gap_column,
+        };
+        let gap = Operand {
+            kind: OperandKind::Literal(Value::from(gap)),
+            text: gap.to_string(),
+            column: gap_column,
+        };
+        body.push(generated(Instruction::If {
+            predicate: Expression::Not(Box::new(Expression::Value(last))),
+            then_body: vec![generated(Instruction::Delay(gap))],
+            else_body: Vec::new(),
+        }));
+
+        statements.push(Statement {
+            line: self.line,
+            destination: Some(items_name.clone()),
+            instruction: Instruction::Collect(Vec::new()),
+        });
+        statements.push(Statement {
+            line: self.line,
+            destination: Some(name),
+            instruction: Instruction::Repeat {
+                count,
+                context: Some("i".to_owned()),
+                body,
+            },
+        });
+        parser.macro_expansions.push(MacroExpansion {
+            line: self.line,
+            items_name,
+            capture_name: capture,
+            capture_assigned,
+        });
+        Ok(())
     }
 
     fn block(
         &mut self,
-        lines: &mut Lines<'_>,
+        parser: &mut ProgramParser<'_>,
         depth: usize,
         kind: BlockKind,
     ) -> Result<ParsedBlock, Error> {
@@ -302,20 +484,31 @@ impl LineParser<'_> {
         if depth >= MAX_DEPTH {
             return Err(self.error("Block nesting exceeds the limit"));
         }
+        let mut body = Vec::new();
         if self.at < self.tokens.len() {
             let start = self.at;
             while let Some(token) = self.tokens.get(self.at) {
                 match token.kind {
                     TokenKind::CloseBlock => {
-                        let body = LineParser {
+                        let statement_kind = if kind == BlockKind::MacroBody {
+                            StatementKind::MacroBody
+                        } else {
+                            StatementKind::Inline
+                        };
+                        LineParser {
                             tokens: &self.tokens[start..self.at],
                             at: 0,
                             ..*self
                         }
-                        .statement(lines, depth + 1, true)?;
+                        .statement(
+                            parser,
+                            depth + 1,
+                            statement_kind,
+                            &mut body,
+                        )?;
                         self.at += 1;
                         return Ok(ParsedBlock {
-                            body: vec![body],
+                            body,
                             continued_else: None,
                         });
                     }
@@ -330,22 +523,27 @@ impl LineParser<'_> {
         if kind == BlockKind::ElseAfterInlineThen {
             return Err(self.error("A same-line else requires a single-line block"));
         }
-        let mut body = Vec::new();
-        while let Some(line) = lines.next() {
-            let mut parser = line.parser();
-            if parser.consume(&TokenKind::CloseBlock) {
-                let continued_else = if kind == BlockKind::IfThen && parser.consume_word("else") {
-                    Some(parser.block(lines, depth, BlockKind::Plain)?.body)
+        let statement_kind = if kind == BlockKind::MacroBody {
+            StatementKind::MacroBody
+        } else {
+            StatementKind::Plain
+        };
+        while let Some(line) = parser.lines.next() {
+            let mut block_line = line.parser();
+            if block_line.consume(&TokenKind::CloseBlock) {
+                let continued_else = if kind == BlockKind::IfThen && block_line.consume_word("else")
+                {
+                    Some(block_line.block(parser, depth, BlockKind::Plain)?.body)
                 } else {
                     None
                 };
-                parser.finish()?;
+                block_line.finish()?;
                 return Ok(ParsedBlock {
                     body,
                     continued_else,
                 });
             }
-            body.push(parser.statement(lines, depth + 1, false)?);
+            block_line.statement(parser, depth + 1, statement_kind, &mut body)?;
         }
         Err(self.error("Expected } to close the block"))
     }
@@ -588,6 +786,17 @@ impl LineParser<'_> {
         Error::new(ErrorCode::EParse, message)
             .at(self.line)
             .column(column)
+    }
+}
+
+fn reference_operand(name: String, column: usize) -> Operand {
+    Operand {
+        text: name.clone(),
+        kind: OperandKind::Reference(Path {
+            root: name,
+            segments: Vec::new(),
+        }),
+        column,
     }
 }
 

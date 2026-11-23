@@ -8,7 +8,7 @@ lagomys 是一门面向 AI 助手的运维与测试脚本语言。助手可以�
 - 脚本可以筛选和截取数据、断言验收条件，并在异步任务等待超时后返回任务标识供续查。
 - 平台动作通过 HTTP 描述文件或 MCP stdio 扩展接入。
 
-当前规范版本为 0.2。运行器使用 Rust，构建目标为 Linux x86_64、Linux arm64 和 macOS arm64。
+当前规范版本为 0.3。运行器使用 Rust，构建目标为 Linux x86_64、Linux arm64 和 macOS arm64。
 
 ## 快速体验
 
@@ -23,7 +23,7 @@ cargo build --release --locked
 ```sh
 cat > binding.json <<'JSON'
 {
-  "spec": "0.2",
+  "spec": "0.3",
   "targets": [{ "kind": "file", "path": "Cargo.toml" }],
   "modules": [],
   "budget": { "seconds": 5, "actions": 1, "output_bytes": 4096 }
