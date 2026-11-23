@@ -23,6 +23,11 @@ pub struct CoreActions(Vec<ActionSignature>);
 
 impl CoreActions {
     pub fn new() -> Self {
+        let process_records = list_record([
+            ("pid", Type::Integer),
+            ("name", Type::String),
+            ("running", Type::Bool),
+        ]);
         let actions = vec![
             signature(
                 "file.read",
@@ -44,11 +49,12 @@ impl CoreActions {
             signature(
                 "proc.status",
                 vec![Parameter::target("process", TargetKind::Process)],
-                list_record([
-                    ("pid", Type::Integer),
-                    ("name", Type::String),
-                    ("running", Type::Bool),
-                ]),
+                process_records.clone(),
+            ),
+            signature(
+                "proc.list",
+                vec![Parameter::target("local", TargetKind::Local)],
+                process_records,
             ),
             signature(
                 "net.probe",
@@ -192,6 +198,7 @@ impl ActionProvider for CoreActions {
             ("proc.status", Some(Argument::Target(Target::Process { process }))) => {
                 process::status(process, context)
             }
+            ("proc.list", Some(Argument::Target(Target::Local {}))) => process::list(context),
             ("net.probe", Some(Argument::Target(Target::Host { host }))) => {
                 let port = arguments
                     .get(1)

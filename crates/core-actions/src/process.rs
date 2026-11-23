@@ -3,11 +3,22 @@ use ops_spec::{Error, Process, Value};
 use serde_json::json;
 
 pub(crate) fn status(target: &Process, context: &ActionContext) -> Result<Value, Error> {
-    let mut processes = operating_system(target, context)?;
+    match target {
+        Process::Pid(pid) => lookup_pid(*pid, context),
+        Process::Name(name) => enumerate(Some(name), context),
+    }
+    .map(records)
+}
+
+pub(crate) fn list(context: &ActionContext) -> Result<Value, Error> {
+    enumerate(None, context).map(records)
+}
+
+fn records(mut processes: Vec<Entry>) -> Value {
     processes.sort_unstable_by_key(|process| process.pid);
-    Ok(Value::Array(processes.into_iter().map(|process| {
+    Value::Array(processes.into_iter().map(|process| {
         json!({ "pid": process.pid, "name": process.name, "running": process.running })
-    }).collect()))
+    }).collect())
 }
 
 struct Entry {
@@ -17,64 +28,89 @@ struct Entry {
 }
 
 #[cfg(target_os = "linux")]
-fn operating_system(target: &Process, context: &ActionContext) -> Result<Vec<Entry>, Error> {
-    use std::{fs, io::ErrorKind};
+fn lookup_pid(pid: u32, context: &ActionContext) -> Result<Vec<Entry>, Error> {
+    let mut bytes = 0;
+    Ok(inspect(pid, None, &mut bytes, context)?
+        .into_iter()
+        .collect())
+}
 
+#[cfg(target_os = "linux")]
+fn enumerate(expected: Option<&str>, context: &ActionContext) -> Result<Vec<Entry>, Error> {
+    let directory = std::fs::read_dir("/proc")
+        .map_err(|error| crate::io_error("enumerate processes", &error))?;
     let mut processes = Vec::new();
-    let mut bytes = 0_usize;
-    let mut inspect = |pid| -> Result<(), Error> {
+    let mut bytes = 0;
+    for directory_entry in directory {
         context.remaining()?;
-        let path = format!("/proc/{pid}/stat");
-        let stat = match fs::read_to_string(&path) {
-            Ok(stat) => stat,
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    ErrorKind::NotFound | ErrorKind::PermissionDenied
-                ) =>
-            {
-                return Ok(())
-            }
-            Err(error) => return Err(crate::io_error("inspect the bound process", &error)),
-        };
-        if let Some((head, tail)) = stat.rsplit_once(')') {
-            if let Some((_, name)) = head.split_once('(') {
-                if matches!(target, Process::Name(expected) if name != expected) {
-                    return Ok(());
-                }
-                bytes = bytes.saturating_add(name.len() + 64);
-                if bytes > context.max_bytes {
-                    return Err(crate::data_limit());
-                }
-                processes.push(Entry {
-                    pid,
-                    name: name.to_owned(),
-                    running: !tail.trim_start().starts_with(['Z', 'X', 'x']),
-                });
-            }
-        }
-        Ok(())
-    };
-    match target {
-        Process::Pid(pid) => inspect(*pid)?,
-        Process::Name(_) => {
-            let directory = fs::read_dir("/proc")
-                .map_err(|error| crate::io_error("enumerate processes", &error))?;
-            for directory_entry in directory {
-                context.remaining()?;
-                let directory_entry = directory_entry
-                    .map_err(|error| crate::io_error("inspect process inventory", &error))?;
-                if let Ok(pid) = directory_entry.file_name().to_string_lossy().parse() {
-                    inspect(pid)?;
-                }
-            }
+        let directory_entry = directory_entry
+            .map_err(|error| crate::io_error("inspect process inventory", &error))?;
+        if let Ok(pid) = directory_entry.file_name().to_string_lossy().parse() {
+            processes.extend(inspect(pid, expected, &mut bytes, context)?);
         }
     }
     Ok(processes)
 }
 
+#[cfg(target_os = "linux")]
+fn inspect(
+    pid: u32,
+    expected: Option<&str>,
+    bytes: &mut usize,
+    context: &ActionContext,
+) -> Result<Option<Entry>, Error> {
+    use std::{fs, io::ErrorKind};
+
+    context.remaining()?;
+    let path = format!("/proc/{pid}/stat");
+    let stat = match fs::read_to_string(&path) {
+        Ok(stat) => stat,
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::NotFound | ErrorKind::PermissionDenied
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(crate::io_error("inspect the bound process", &error)),
+    };
+    let Some((head, tail)) = stat.rsplit_once(')') else {
+        return Ok(None);
+    };
+    let Some((_, name)) = head.split_once('(') else {
+        return Ok(None);
+    };
+    if matches!(expected, Some(expected) if name != expected) {
+        return Ok(None);
+    }
+    *bytes = bytes.saturating_add(name.len() + 64);
+    if *bytes > context.max_bytes {
+        return Err(crate::data_limit());
+    }
+    Ok(Some(Entry {
+        pid,
+        name: name.to_owned(),
+        running: !tail.trim_start().starts_with(['Z', 'X', 'x']),
+    }))
+}
+
 #[cfg(target_os = "macos")]
-fn operating_system(target: &Process, context: &ActionContext) -> Result<Vec<Entry>, Error> {
+fn lookup_pid(pid: u32, context: &ActionContext) -> Result<Vec<Entry>, Error> {
+    ps_entries(Some(pid), None, context)
+}
+
+#[cfg(target_os = "macos")]
+fn enumerate(expected: Option<&str>, context: &ActionContext) -> Result<Vec<Entry>, Error> {
+    ps_entries(None, expected, context)
+}
+
+#[cfg(target_os = "macos")]
+fn ps_entries(
+    pid: Option<u32>,
+    expected: Option<&str>,
+    context: &ActionContext,
+) -> Result<Vec<Entry>, Error> {
     use ops_spec::ErrorCode;
     use std::{
         io::Read,
@@ -85,13 +121,10 @@ fn operating_system(target: &Process, context: &ActionContext) -> Result<Vec<Ent
     };
 
     let mut command = Command::new("/bin/ps");
-    match target {
-        Process::Pid(pid) => {
-            command.arg("-p").arg(pid.to_string());
-        }
-        Process::Name(_) => {
-            command.arg("-ax");
-        }
+    if let Some(pid) = pid {
+        command.arg("-p").arg(pid.to_string());
+    } else {
+        command.arg("-ax");
     }
     let mut child = command
         .args(["-o", "pid=,state=,comm="])
@@ -141,9 +174,8 @@ fn operating_system(target: &Process, context: &ActionContext) -> Result<Vec<Ent
             }
             std::thread::sleep(context.remaining()?.min(Duration::from_millis(5)));
         };
-        if !status.success()
-            && !matches!(target, Process::Pid(_) if bytes.is_empty() && status.code() == Some(1))
-        {
+        let missing_pid = pid.is_some() && bytes.is_empty() && status.code() == Some(1);
+        if !status.success() && !missing_pid {
             return Err(Error::new(
                 ErrorCode::EIo,
                 "System process inventory failed",
@@ -164,8 +196,7 @@ fn operating_system(target: &Process, context: &ActionContext) -> Result<Vec<Ent
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or(executable);
-            if matches!(target, Process::Name(expected) if name != expected && executable != expected)
-            {
+            if matches!(expected, Some(expected) if name != expected && executable != expected) {
                 continue;
             }
             if let Ok(pid) = pid.parse() {
