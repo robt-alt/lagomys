@@ -142,6 +142,18 @@ impl Line<'_> {
 
 type Lines<'a> = std::iter::Peekable<std::vec::IntoIter<Line<'a>>>;
 
+#[derive(PartialEq, Eq)]
+enum BlockKind {
+    Plain,
+    IfThen,
+    ElseAfterInlineThen,
+}
+
+struct ParsedBlock {
+    body: Vec<Statement>,
+    continued_else: Option<Vec<Statement>>,
+}
+
 struct LineParser<'a> {
     source: &'a str,
     tokens: &'a [Token],
@@ -216,7 +228,7 @@ impl LineParser<'_> {
                 } else {
                     None
                 };
-                let body = self.block(lines, depth, false)?;
+                let body = self.block(lines, depth, BlockKind::Plain)?.body;
                 Instruction::Repeat {
                     count,
                     context,
@@ -226,19 +238,17 @@ impl LineParser<'_> {
             "if" => {
                 self.space()?;
                 let predicate = self.expression()?;
-                let then_body = self.block(lines, depth, false)?;
-                let else_body = if self.consume_word("else") {
-                    self.block(lines, depth, true)?
-                } else if lines.peek().is_some_and(|line| {
-                    matches!(line.tokens.first().map(|token| &token.kind),
-                        Some(TokenKind::Word(word)) if word == "else")
-                }) {
-                    let line = lines
-                        .next()
-                        .ok_or_else(|| self.error("Expected else block"))?;
+                let then_block = self.block(lines, depth, BlockKind::IfThen)?;
+                let else_body = if let Some(body) = then_block.continued_else {
+                    body
+                } else if self.consume_word("else") {
+                    self.block(lines, depth, BlockKind::ElseAfterInlineThen)?
+                        .body
+                } else if let Some(line) = lines.next_if(|line| line.parser().consume_word("else"))
+                {
                     let mut parser = line.parser();
                     parser.at = 1;
-                    let body = parser.block(lines, depth, false)?;
+                    let body = parser.block(lines, depth, BlockKind::Plain)?.body;
                     parser.finish()?;
                     body
                 } else {
@@ -246,7 +256,7 @@ impl LineParser<'_> {
                 };
                 Instruction::If {
                     predicate,
-                    then_body,
+                    then_body: then_block.body,
                     else_body,
                 }
             }
@@ -286,8 +296,8 @@ impl LineParser<'_> {
         &mut self,
         lines: &mut Lines<'_>,
         depth: usize,
-        same_line_else: bool,
-    ) -> Result<Vec<Statement>, Error> {
+        kind: BlockKind,
+    ) -> Result<ParsedBlock, Error> {
         self.expect(&TokenKind::OpenBlock, "Expected { to start a block")?;
         if depth >= MAX_DEPTH {
             return Err(self.error("Block nesting exceeds the limit"));
@@ -304,7 +314,10 @@ impl LineParser<'_> {
                         }
                         .statement(lines, depth + 1, true)?;
                         self.at += 1;
-                        return Ok(vec![body]);
+                        return Ok(ParsedBlock {
+                            body: vec![body],
+                            continued_else: None,
+                        });
                     }
                     TokenKind::OpenBlock => {
                         return Err(self.error("A single-line block cannot contain another block"));
@@ -314,15 +327,23 @@ impl LineParser<'_> {
             }
             return Err(self.error("Expected } to close a single-line block"));
         }
-        if same_line_else {
+        if kind == BlockKind::ElseAfterInlineThen {
             return Err(self.error("A same-line else requires a single-line block"));
         }
         let mut body = Vec::new();
         while let Some(line) = lines.next() {
             let mut parser = line.parser();
             if parser.consume(&TokenKind::CloseBlock) {
+                let continued_else = if kind == BlockKind::IfThen && parser.consume_word("else") {
+                    Some(parser.block(lines, depth, BlockKind::Plain)?.body)
+                } else {
+                    None
+                };
                 parser.finish()?;
-                return Ok(body);
+                return Ok(ParsedBlock {
+                    body,
+                    continued_else,
+                });
             }
             body.push(parser.statement(lines, depth + 1, false)?);
         }
