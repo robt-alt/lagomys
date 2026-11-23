@@ -18,6 +18,8 @@ lagomys 是一门面向 AI 助手的运维与测试脚本语言。助手可以�
 curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/robt-alt/lagomys/main/scripts/install.sh | sh
 ```
 
+安装后会自动写入 shell 的 PATH 配置（`LAGOMYS_NO_MODIFY_PATH=1` 可跳过）。
+
 Linux 运行依赖系统的 `libcurl4`。钉版本安装设 `LAGOMYS_VERSION`（如 `v0.2.0`）；发布版的规范版本以 Releases 为准。从源码构建见下方快速体验。
 
 ## 快速体验

@@ -37,6 +37,65 @@ cleanup() {
     fi
 }
 
+escape_single_quotes() {
+    printf '%s' "$1" | sed "s/'/'\\\\''/g"
+}
+
+print_path_hint() {
+    printf 'Add the installation directory to PATH.\n  %s\n' "$path_line"
+}
+
+persist_path() {
+    [ -n "${HOME-}" ] || return 1
+    user_shell=${SHELL-}
+    case "${user_shell##*/}" in
+        zsh) shell_rc="$HOME/.zshrc" ;;
+        bash) shell_rc="$HOME/.bashrc" ;;
+        *) shell_rc="$HOME/.profile" ;;
+    esac
+
+    if [ -f "$shell_rc" ]; then
+        if grep -Fqx -- "$path_line" "$shell_rc"; then
+            return 0
+        elif [ "$?" -ne 1 ]; then
+            return 1
+        fi
+    elif [ -e "$shell_rc" ]; then
+        return 1
+    fi
+
+    separator=
+    if [ -s "$shell_rc" ]; then
+        # Preserve a final newline through command substitution.
+        last_byte=$(tail -c 1 "$shell_rc" && printf '.') || return 1
+        if [ "$last_byte" != "$(printf '\n.')" ]; then
+            separator='\n'
+        fi
+    fi
+
+    quoted_rc=$(escape_single_quotes "$shell_rc") || return 1
+    printf '%b%s\n' "$separator" "$path_line" >> "$shell_rc" || return 1
+    printf "Added the installation directory to %s.\nOpen a new terminal or run the following command.\n  source '%s'\n" \
+        "$shell_rc" "$quoted_rc"
+}
+
+configure_path() {
+    if [ -z "${LAGOMYS_NO_MODIFY_PATH-}" ]; then
+        case ":${PATH-}:" in
+            *":$bin_dir:"*) return 0 ;;
+        esac
+    fi
+
+    quoted_bin_dir=$(escape_single_quotes "$bin_dir")
+    path_line="export PATH='$quoted_bin_dir':\"\$PATH\""
+    if [ -n "${LAGOMYS_NO_MODIFY_PATH-}" ]; then
+        print_path_hint
+    elif ! persist_path 2>/dev/null; then
+        printf 'lagomys installer: warning: could not update the shell PATH configuration.\n' >&2
+        print_path_hint
+    fi
+}
+
 release_tag=${LAGOMYS_VERSION-}
 if [ "${LAGOMYS_VERSION+x}" = x ] && ! valid_tag "$release_tag"; then
     fail 'Invalid LAGOMYS_VERSION. Use a tag such as v0.2.0.'
@@ -129,10 +188,4 @@ mv -f "$staged" "$destination" || fail 'Could not replace the installed binary.'
 staged=
 
 printf '%s\n' "$version_output"
-case ":${PATH-}:" in
-    *":$bin_dir:"*) ;;
-    *)
-        quoted_bin_dir=$(printf '%s' "$bin_dir" | sed "s/'/'\\\\''/g")
-        printf "Add the installation directory to PATH.\n  export PATH='%s':\"\$PATH\"\n" "$quoted_bin_dir"
-        ;;
-esac
+configure_path
