@@ -1,9 +1,13 @@
-use std::{collections::BTreeMap, fmt::Write};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt::Write,
+};
 
 use curl::easy::{Easy, List};
 use ops_actions::{ActionContext, ActionProvider};
 use ops_spec::{
-    is_name, pick, ActionSignature, Argument, Error, ErrorCode, Parameter, TargetKind, Type, Value,
+    is_name, pick, ActionSignature, Argument, Error, ErrorCode, Parameter, Target, TargetKind,
+    Type, Value,
 };
 use serde::Deserialize;
 
@@ -16,6 +20,7 @@ pub(crate) struct Manifest {
     _spec: String,
     #[serde(rename = "module")]
     _module: String,
+    credential_hosts: Option<Vec<String>>,
     actions: Vec<Descriptor>,
 }
 
@@ -80,7 +85,7 @@ struct Endpoint {
 }
 
 pub(crate) struct HttpProvider {
-    signatures: Vec<ActionSignature>,
+    pub(super) signatures: Vec<ActionSignature>,
     endpoints: BTreeMap<String, Endpoint>,
     credentials: Credentials,
 }
@@ -90,9 +95,16 @@ impl HttpProvider {
         module: &str,
         manifest: Manifest,
         credentials: Credentials,
+        targets: &[Target],
     ) -> Result<Self, Error> {
         let mut signatures = Vec::new();
         let mut endpoints = BTreeMap::new();
+        let credential_hosts = manifest.credential_hosts.map(|hosts| {
+            hosts
+                .iter()
+                .map(|host| host.to_lowercase())
+                .collect::<BTreeSet<_>>()
+        });
         for action in manifest.actions {
             let name = crate::action_name(module, &action.name)?;
             let mut parameters: Vec<Parameter> = Vec::new();
@@ -118,8 +130,9 @@ impl HttpProvider {
             if !is_http_token(&action.request.method) {
                 return Err(invalid(format!("Invalid HTTP method in {name}")));
             }
-            let url = template(&action.request.url, &mut parameters)?;
+            let (url, authority) = template(&action.request.url, &mut parameters)?;
             if let Some(credential) = &action.credential {
+                check_credential_hosts(&name, authority, credential_hosts.as_ref(), targets)?;
                 let value = credentials.get(credential).ok_or_else(|| {
                     invalid(format!("Missing credential {credential} for {name}"))
                 })?;
@@ -242,7 +255,10 @@ impl ActionProvider for HttpProvider {
     }
 }
 
-fn template(text: &str, parameters: &mut [Parameter]) -> Result<Vec<UrlPart>, Error> {
+fn template<'a>(
+    text: &'a str,
+    parameters: &mut [Parameter],
+) -> Result<(Vec<UrlPart>, &'a str), Error> {
     let (scheme, host_and_path) = text
         .split_once("://")
         .ok_or_else(|| invalid("HTTP URL requires a scheme"))?;
@@ -257,7 +273,8 @@ fn template(text: &str, parameters: &mut [Parameter]) -> Result<Vec<UrlPart>, Er
         .find(['/', '?', '#'])
         .unwrap_or(host_and_path.len());
     let authority_end = scheme.len() + 3 + host_size;
-    if host_size == 0 || host_and_path[..host_size].contains('@') {
+    let authority = &host_and_path[..host_size];
+    if authority.is_empty() || authority.contains('@') {
         return Err(invalid(
             "HTTP URL requires an authority without credentials",
         ));
@@ -292,7 +309,62 @@ fn template(text: &str, parameters: &mut [Parameter]) -> Result<Vec<UrlPart>, Er
         return Err(invalid("Unmatched URL template delimiter"));
     }
     parts.push(UrlPart::Literal(text[offset..].to_owned()));
-    Ok(parts)
+    Ok((parts, authority))
+}
+
+fn check_credential_hosts(
+    action: &str,
+    authority: &str,
+    allowed_hosts: Option<&BTreeSet<String>>,
+    targets: &[Target],
+) -> Result<(), Error> {
+    let allowed_hosts = allowed_hosts.ok_or_else(|| {
+        invalid(format!(
+            "Credential action {action} requires credential_hosts"
+        ))
+    })?;
+    if let Some(open) = authority.find('{') {
+        // The URL template has already been validated. A descriptor declares one target parameter.
+        let (_, after) = authority[open..]
+            .split_once('}')
+            .ok_or_else(|| invalid("Unclosed URL template parameter"))?;
+        let placeholder = &authority[open..authority.len() - after.len()];
+        for target in targets {
+            if let Target::Host { host } = target {
+                let mut encoded = String::new();
+                append_url_parameter(&mut encoded, host);
+                let rendered = authority.replace(placeholder, &encoded);
+                let host = authority_host(&rendered).to_lowercase();
+                if !allowed_hosts.contains(&host) {
+                    return Err(Error::new(
+                        ErrorCode::EEgress,
+                        format!(
+                            "Credential action {action} renders host {host} outside credential_hosts"
+                        ),
+                    ));
+                }
+            }
+        }
+    } else {
+        let host = authority_host(authority).to_lowercase();
+        if !allowed_hosts.contains(&host) {
+            return Err(invalid(format!(
+                "Credential action {action} uses host {host} outside credential_hosts"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn authority_host(authority: &str) -> &str {
+    match authority.rsplit_once(':') {
+        Some((host, port))
+            if !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            host
+        }
+        _ => authority,
+    }
 }
 
 fn render(parts: &[UrlPart], arguments: &[Argument]) -> Result<String, Error> {
@@ -310,17 +382,21 @@ fn render(parts: &[UrlPart], arguments: &[Argument]) -> Result<String, Error> {
                 } else {
                     value.to_string()
                 };
-                for byte in text.bytes() {
-                    if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
-                        url.push(char::from(byte));
-                    } else {
-                        let _ = write!(url, "%{byte:02X}");
-                    }
-                }
+                append_url_parameter(&mut url, &text);
             }
         }
     }
     Ok(url)
+}
+
+fn append_url_parameter(url: &mut String, text: &str) {
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            url.push(char::from(byte));
+        } else {
+            let _ = write!(url, "%{byte:02X}");
+        }
+    }
 }
 
 fn is_http_token(value: &str) -> bool {

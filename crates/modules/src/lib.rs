@@ -4,10 +4,14 @@ mod descriptor;
 mod mcp;
 mod transport;
 
-use std::{collections::BTreeMap, path::Path, time::Instant};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+    time::Instant,
+};
 
 use ops_actions::Registry;
-use ops_spec::{is_name, Binding, Error, ErrorCode, Value, VERSION};
+use ops_spec::{is_name, ActionSignature, Binding, Error, ErrorCode, Value, VERSION};
 use serde::Deserialize;
 
 type Credentials = BTreeMap<String, String>;
@@ -102,20 +106,74 @@ pub fn load(
             ));
         }
     }
+    for (module, actions) in &binding.allow {
+        if let Some(name) = actions.first().filter(|_| !manifests.contains_key(module)) {
+            return Err(unknown_mount_action(module, name));
+        }
+    }
     for (module, bytes) in manifests {
         let value: Value = decode(&bytes, "module manifest")?;
         let credentials = secrets.for_module(&module);
+        let allow = binding.allow.get(&module).map(Vec::as_slice);
         if value.get("command").is_some() {
             let manifest = decode(&bytes, "MCP mount")?;
-            let provider = mcp::McpProvider::mount(&module, manifest, credentials, deadline)?;
+            let mut provider = mcp::McpProvider::mount(&module, manifest, credentials, deadline)?;
+            apply_allow(registry, &module, &mut provider.signatures, allow)?;
             registry.register(Some(module), provider)?;
         } else {
             let manifest = decode(&bytes, "HTTP module")?;
-            let provider = descriptor::HttpProvider::new(&module, manifest, credentials)?;
+            let mut provider =
+                descriptor::HttpProvider::new(&module, manifest, credentials, &binding.targets)?;
+            apply_allow(registry, &module, &mut provider.signatures, allow)?;
             registry.register(Some(module), provider)?;
         }
     }
     Ok(())
+}
+
+fn apply_allow(
+    registry: &mut Registry,
+    module: &str,
+    signatures: &mut Vec<ActionSignature>,
+    allow: Option<&[String]>,
+) -> Result<(), Error> {
+    let Some(allow) = allow else { return Ok(()) };
+    let mounted = signatures
+        .iter()
+        .map(|signature| (signature.name.as_str(), signature))
+        .collect::<BTreeMap<_, _>>();
+    let allowed = allow.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    for name in allow {
+        let signature = mounted
+            .get(name.as_str())
+            .ok_or_else(|| unknown_mount_action(module, name))?;
+        if let Some(poll) = &signature.poll {
+            if !allowed.contains(poll.as_str()) {
+                return Err(Error::new(
+                    ErrorCode::EUnknownAction,
+                    format!("Allowed action {name} requires poll action {poll} in allow"),
+                ));
+            }
+        }
+    }
+    let mut filtered = Vec::new();
+    signatures.retain(|signature| {
+        if allowed.contains(signature.name.as_str()) {
+            true
+        } else {
+            filtered.push(signature.name.clone());
+            false
+        }
+    });
+    registry.record_filtered(filtered);
+    Ok(())
+}
+
+fn unknown_mount_action(module: &str, name: &str) -> Error {
+    Error::new(
+        ErrorCode::EUnknownAction,
+        format!("Allow list for module {module} names unmounted action {name}"),
+    )
 }
 
 fn read_manifest(path: &Path) -> Result<Vec<u8>, Error> {

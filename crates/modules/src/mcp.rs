@@ -24,8 +24,8 @@ pub(crate) struct Manifest {
     command: String,
     #[serde(default)]
     args: Vec<String>,
-    #[serde(default)]
-    actions: Vec<Mapping>,
+    #[serde(default, deserialize_with = "explicit_mappings")]
+    actions: Option<Vec<Mapping>>,
 }
 
 #[derive(Deserialize)]
@@ -50,7 +50,7 @@ struct Tool {
 }
 
 pub(crate) struct McpProvider {
-    signatures: Vec<ActionSignature>,
+    pub(super) signatures: Vec<ActionSignature>,
     tools: BTreeMap<String, String>,
     session: RefCell<Session>,
 }
@@ -86,19 +86,11 @@ impl McpProvider {
         }
         session.initialized(deadline)?;
         let catalog = discover(&mut session, deadline)?;
-        let mappings = if manifest.actions.is_empty() {
-            catalog
-                .keys()
-                .map(|name| Mapping {
-                    name: name.clone(),
-                    tool: name.clone(),
-                    params: Vec::new(),
-                    targets: BTreeMap::new(),
-                    poll: None,
-                })
-                .collect()
-        } else {
-            manifest.actions
+        let mappings = match manifest.actions {
+            None => automatic_mappings(&catalog, true),
+            // An explicitly empty list keeps the existing discovery behavior.
+            Some(mappings) if mappings.is_empty() => automatic_mappings(&catalog, false),
+            Some(mappings) => mappings,
         };
         let mut signatures = Vec::new();
         let mut tools = BTreeMap::new();
@@ -121,6 +113,55 @@ impl McpProvider {
             session: RefCell::new(session),
         })
     }
+}
+
+fn explicit_mappings<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Vec<Mapping>>, D::Error> {
+    Vec::deserialize(deserializer).map(Some)
+}
+
+fn automatic_mappings(catalog: &BTreeMap<String, Tool>, normalize: bool) -> Vec<Mapping> {
+    let mut used = BTreeMap::new();
+    catalog
+        .keys()
+        .map(|tool| Mapping {
+            name: if normalize {
+                normalized_name(tool, &mut used)
+            } else {
+                tool.clone()
+            },
+            tool: tool.clone(),
+            params: Vec::new(),
+            targets: BTreeMap::new(),
+            poll: None,
+        })
+        .collect()
+}
+
+fn normalized_name(tool: &str, used: &mut BTreeMap<String, usize>) -> String {
+    let mut base = String::new();
+    if tool.as_bytes().first().is_some_and(u8::is_ascii_digit) {
+        base.push('_');
+    }
+    for character in tool.chars() {
+        base.push(if character.is_ascii_alphanumeric() {
+            character
+        } else {
+            '_'
+        });
+    }
+    let mut name = base.clone();
+    let mut suffix = used.get(&base).copied().unwrap_or(2);
+    while used.contains_key(&name) {
+        name = format!("{base}_{suffix}");
+        suffix += 1;
+    }
+    if name != base {
+        used.insert(base, suffix);
+    }
+    used.insert(name.clone(), 2);
+    name
 }
 
 impl ActionProvider for McpProvider {

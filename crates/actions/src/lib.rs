@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     time::{Duration, Instant},
 };
 
@@ -41,6 +41,7 @@ struct Provider {
 pub struct Registry {
     providers: Vec<Provider>,
     indices: BTreeMap<String, (usize, usize)>,
+    filtered: BTreeSet<String>,
 }
 
 impl Registry {
@@ -71,6 +72,10 @@ impl Registry {
         Ok(())
     }
 
+    pub fn record_filtered(&mut self, actions: impl IntoIterator<Item = String>) {
+        self.filtered.extend(actions);
+    }
+
     pub fn has_module(&self, module: &str) -> bool {
         self.providers
             .iter()
@@ -99,6 +104,12 @@ impl Registry {
                 }
             }
             return Ok(signature);
+        }
+        if self.filtered.contains(action) {
+            return Err(Error::new(
+                ErrorCode::EUnknownAction,
+                format!("Action {action} is excluded by this run's allow list"),
+            ));
         }
         let (namespace, _) = action.split_once('.').ok_or_else(|| unknown(action))?;
         if self.has_module(namespace)

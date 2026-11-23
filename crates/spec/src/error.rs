@@ -14,6 +14,7 @@ pub enum ErrorCode {
     EArgCount,
     EArgType,
     ERef,
+    EEgress,
     EBudget,
     EFieldMissing,
     EActionFailed,

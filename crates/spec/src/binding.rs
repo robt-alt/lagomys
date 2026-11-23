@@ -12,6 +12,8 @@ pub struct Binding {
     pub modules: Vec<String>,
     pub budget: Budget,
     #[serde(default)]
+    pub allow: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
     pub credentials: BTreeMap<String, BTreeMap<String, String>>,
 }
 
