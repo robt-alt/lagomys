@@ -13,6 +13,14 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+      - name: Install ShellCheck if needed
+        if: runner.os == 'macOS'
+        run: |
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            brew install shellcheck
+          fi
+      - name: Check install script
+        run: shellcheck scripts/install.sh
       - name: Install system libcurl
         if: runner.os == 'Linux'
         run: |
