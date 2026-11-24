@@ -2,6 +2,9 @@ use serde::Serialize;
 
 use crate::Value;
 
+pub const MAX_AVAILABLE_FIELDS: usize = 20;
+pub const MAX_DETAIL_BYTES: usize = 1024;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ErrorCode {
@@ -23,6 +26,26 @@ pub enum ErrorCode {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct AvailableFields {
+    pub names: Vec<String>,
+    pub total: usize,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct Diagnostics {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub available: Option<AvailableFields>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct Error {
     pub code: ErrorCode,
     pub message: String,
@@ -33,7 +56,10 @@ pub struct Error {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub module_code: Option<Value>,
+    pub module_code: Option<Box<Value>>,
+    // Boxed so the common Result<_, Error> path stays small; flatten keeps the wire format flat.
+    #[serde(flatten)]
+    pub diagnostics: Option<Box<Diagnostics>>,
 }
 
 impl Error {
@@ -45,6 +71,7 @@ impl Error {
             column: None,
             path: None,
             module_code: None,
+            diagnostics: None,
         }
     }
 
@@ -66,7 +93,48 @@ impl Error {
     }
 
     pub fn module_code(mut self, code: Option<Value>) -> Self {
-        self.module_code = code;
+        self.module_code = code.map(Box::new);
+        self
+    }
+
+    fn diagnostics_mut(&mut self) -> &mut Diagnostics {
+        self.diagnostics.get_or_insert_with(Default::default)
+    }
+
+    pub fn action(mut self, name: impl Into<String>) -> Self {
+        self.diagnostics_mut().action = Some(name.into());
+        self
+    }
+
+    pub fn expected(mut self, kind: impl Into<String>) -> Self {
+        self.diagnostics_mut().expected = Some(kind.into());
+        self
+    }
+
+    pub fn actual(mut self, kind: impl Into<String>) -> Self {
+        self.diagnostics_mut().actual = Some(kind.into());
+        self
+    }
+
+    pub fn available(mut self, names: Vec<String>) -> Self {
+        let total = names.len();
+        self.diagnostics_mut().available = Some(AvailableFields {
+            names: names.into_iter().take(MAX_AVAILABLE_FIELDS).collect(),
+            total,
+        });
+        self
+    }
+
+    pub fn detail(mut self, text: impl Into<String>) -> Self {
+        let mut text = text.into();
+        if text.len() > MAX_DETAIL_BYTES {
+            let mut end = MAX_DETAIL_BYTES;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
+        }
+        self.diagnostics_mut().detail = Some(text);
         self
     }
 }

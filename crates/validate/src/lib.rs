@@ -358,7 +358,8 @@ impl Validator<'_> {
                     .zip(&signature.parameters)
                     .map(|(argument, parameter)| {
                         let (argument, kind) =
-                            check_value(argument, results, None, false, parameter.target, binding)?;
+                            check_value(argument, results, None, false, parameter.target, binding)
+                                .map_err(|error| error.action(&name))?;
                         let valid = match &argument.kind {
                             CheckedValue::Literal(value) => parameter.value_type.accepts(value),
                             CheckedValue::Target(index) => {
@@ -369,6 +370,13 @@ impl Validator<'_> {
                             _ => parameter.value_type.compatible(&kind),
                         };
                         if !valid {
+                            let actual = match &argument.kind {
+                                CheckedValue::Target(index) => binding
+                                    .targets
+                                    .get(*index)
+                                    .map_or(kind.name(), |target| Type::of(&target.value()).name()),
+                                _ => kind.name(),
+                            };
                             return Err(Error::new(
                                 ErrorCode::EArgType,
                                 format!(
@@ -376,7 +384,10 @@ impl Validator<'_> {
                                     parameter.name,
                                     parameter.value_type.name()
                                 ),
-                            ));
+                            )
+                            .action(&name)
+                            .expected(parameter.value_type.name())
+                            .actual(actual));
                         }
                         Ok(argument)
                     })
@@ -732,7 +743,9 @@ fn check_value(
                 return Err(fail(
                     ErrorCode::ETargetType,
                     format!("Target @{index} must have kind {}", kind.name()),
-                ));
+                )
+                .expected(kind.name())
+                .actual(bound.kind().name()));
             }
             (CheckedValue::Target(index), Type::Any)
         }

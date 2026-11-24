@@ -324,6 +324,7 @@ impl<'a> Execution<'a, '_> {
                     ErrorCode::EActionFailed,
                     format!("Action {name} returned an invalid task identifier"),
                 )
+                .action(name)
             })?;
         let task = Task {
             id,
@@ -379,6 +380,7 @@ impl<'a> Execution<'a, '_> {
                         .cloned();
                     return Err(
                         Error::new(ErrorCode::EActionFailed, "Asynchronous task failed")
+                            .action(&task.poll)
                             .module_code(module_code),
                     );
                 }
@@ -523,6 +525,7 @@ fn invalid_poll(task: &Task) -> Error {
         ErrorCode::EActionFailed,
         format!("Invalid observation from {}", task.poll),
     )
+    .action(&task.poll)
 }
 
 fn json_size(value: &impl Serialize) -> Result<usize, Error> {

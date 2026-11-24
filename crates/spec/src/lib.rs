@@ -8,7 +8,9 @@ mod result;
 
 pub use binding::{Binding, Budget, Process, Target, TargetKind};
 pub use contract::{ActionSignature, Argument, Parameter, Type};
-pub use error::{Error, ErrorCode};
+pub use error::{
+    AvailableFields, Diagnostics, Error, ErrorCode, MAX_AVAILABLE_FIELDS, MAX_DETAIL_BYTES,
+};
 pub use path::{is_name, pick, truthy, Path, Segment};
 pub use result::{
     Assertion, LoopContext, ObservedValue, RepeatReason, RepeatResult, RunResult, Status, Task,
@@ -16,5 +18,5 @@ pub use result::{
 };
 pub use serde_json::Value;
 
-pub const VERSION: &str = "0.5";
+pub const VERSION: &str = "0.6";
 pub const MAX_DATA_BYTES: usize = 4 * 1024 * 1024;

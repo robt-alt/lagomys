@@ -116,6 +116,7 @@ name = "ops-actions"
 version = "0.4.0"
 dependencies = [
  "ops-spec",
+ "serde_json",
 ]
 
 [[package]]

@@ -155,6 +155,10 @@ impl ActionSignature {
                 (Some(kind), Argument::Target(target))
                     if kind == target.kind() && parameter.value_type.accepts(&target.value()) => {}
                 (Some(kind), _) => {
+                    let actual = match argument {
+                        Argument::Target(target) if target.kind() != kind => target.kind().name(),
+                        _ => Type::of(&argument.value()).name(),
+                    };
                     return Err(Error::new(
                         ErrorCode::ETargetType,
                         format!(
@@ -163,7 +167,10 @@ impl ActionSignature {
                             self.name,
                             kind.name()
                         ),
-                    ))
+                    )
+                    .action(&self.name)
+                    .expected(kind.name())
+                    .actual(actual));
                 }
                 (None, Argument::Value(value)) if parameter.value_type.accepts(value) => {}
                 _ => {
@@ -173,7 +180,10 @@ impl ActionSignature {
                             "Invalid value for parameter {} of {}",
                             parameter.name, self.name
                         ),
-                    ))
+                    )
+                    .action(&self.name)
+                    .expected(parameter.value_type.name())
+                    .actual(Type::of(&argument.value()).name()));
                 }
             }
         }

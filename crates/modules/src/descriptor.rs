@@ -7,7 +7,7 @@ use curl::easy::{Easy, List};
 use ops_actions::{ActionContext, ActionProvider};
 use ops_spec::{
     is_name, pick, ActionSignature, Argument, Error, ErrorCode, Parameter, Target, TargetKind,
-    Type, Value,
+    Type, Value, MAX_DETAIL_BYTES,
 };
 use serde::Deserialize;
 
@@ -239,7 +239,11 @@ impl ActionProvider for HttpProvider {
                 ErrorCode::EActionFailed,
                 format!("HTTP action returned status {response}"),
             )
-            .module_code(Some(Value::from(response))));
+            .action(name)
+            .module_code(Some(Value::from(response)))
+            .detail(String::from_utf8_lossy(
+                &body[..body.len().min(MAX_DETAIL_BYTES)],
+            )));
         }
         let value = serde_json::from_slice(&body).map_err(|_| {
             Error::new(

@@ -37,7 +37,13 @@ impl Path {
                         .collect();
                 }
                 let path = format!("{prefix}.{name}");
-                let field = value.get(name).ok_or_else(|| Error::field(&path))?;
+                let field = value.get(name).ok_or_else(|| {
+                    let error = Error::field(&path);
+                    match value.as_object() {
+                        Some(fields) => error.available(fields.keys().cloned().collect()),
+                        None => error,
+                    }
+                })?;
                 Self::lookup_segments(field, rest, &path)
             }
             Segment::Index(index) => {

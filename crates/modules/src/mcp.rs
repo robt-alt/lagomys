@@ -200,7 +200,7 @@ impl ActionProvider for McpProvider {
         let mut session = self
             .session
             .try_borrow_mut()
-            .map_err(|_| Error::new(ErrorCode::EActionFailed, "MCP module is busy"))?;
+            .map_err(|_| Error::new(ErrorCode::EActionFailed, "MCP module is busy").action(name))?;
         let response = session.request(
             "tools/call",
             json!({"name": tool, "arguments": parameters}),
@@ -209,11 +209,16 @@ impl ActionProvider for McpProvider {
         let value = content(&response)?;
         if response.get("isError").and_then(Value::as_bool) == Some(true) {
             let code = value.get("code").cloned();
+            let detail = value
+                .as_str()
+                .map_or_else(|| value.to_string(), str::to_owned);
             return Err(Error::new(
                 ErrorCode::EActionFailed,
                 format!("MCP action {name} returned an error"),
             )
-            .module_code(code));
+            .action(name)
+            .module_code(code)
+            .detail(detail));
         }
         Ok(value)
     }

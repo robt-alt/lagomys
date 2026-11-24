@@ -132,6 +132,25 @@ impl RunResult {
             if let Some(code) = &mut error.module_code {
                 sanitize_value(code, secrets);
             }
+            if let Some(diagnostics) = &mut error.diagnostics {
+                if let Some(action) = &mut diagnostics.action {
+                    sanitize(action, secrets);
+                }
+                if let Some(expected) = &mut diagnostics.expected {
+                    sanitize(expected, secrets);
+                }
+                if let Some(actual) = &mut diagnostics.actual {
+                    sanitize(actual, secrets);
+                }
+                if let Some(available) = &mut diagnostics.available {
+                    for name in &mut available.names {
+                        sanitize(name, secrets);
+                    }
+                }
+                if let Some(detail) = &mut diagnostics.detail {
+                    sanitize(detail, secrets);
+                }
+            }
         }
         if let Some(task) = &mut self.task {
             sanitize_value(&mut task.id, secrets);

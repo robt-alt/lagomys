@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use ops_spec::{ActionSignature, Argument, Error, ErrorCode, Value};
+use ops_spec::{ActionSignature, Argument, Error, ErrorCode, Type, Value};
 
 pub struct ActionContext {
     pub deadline: Instant,
@@ -146,7 +146,19 @@ impl Registry {
             .get(*signature_index)
             .ok_or_else(|| unknown(action))?;
         signature.check_arguments(arguments)?;
-        provider.implementation.invoke(action, arguments, context)
+        let value = provider.implementation.invoke(action, arguments, context)?;
+        if !signature.output.accepts(&value) {
+            return Err(Error::new(
+                ErrorCode::EActionFailed,
+                format!(
+                    "Action {action} executed but its return value does not match the declared output type"
+                ),
+            )
+            .action(action)
+            .expected(signature.output.name())
+            .actual(Type::of(&value).name()));
+        }
+        Ok(value)
     }
 }
 
