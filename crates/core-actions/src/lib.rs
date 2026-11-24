@@ -187,9 +187,8 @@ impl ActionProvider for CoreActions {
         context.remaining()?;
         match (action, arguments.first()) {
             ("file.read", Some(Argument::Target(Target::File { path }))) => {
-                let lines = arguments
-                    .get(1)
-                    .is_some_and(|argument| argument.value() == "lines");
+                let lines =
+                    matches!(arguments.get(1), Some(Argument::Value(mode)) if mode == "lines");
                 read_file(path, lines, context)
             }
             ("dir.list", Some(Argument::Target(Target::Dir { path }))) => {
@@ -200,23 +199,16 @@ impl ActionProvider for CoreActions {
             }
             ("proc.list", Some(Argument::Target(Target::Local {}))) => process::list(context),
             ("net.probe", Some(Argument::Target(Target::Host { host }))) => {
-                let port = arguments
-                    .get(1)
-                    .and_then(|argument| argument.value().as_u64())
+                let port = unsigned_argument(arguments, 1)
                     .and_then(|value| u16::try_from(value).ok())
                     .ok_or_else(|| {
                         Error::new(ErrorCode::EArgType, "net.probe requires a valid TCP port")
                     })?;
-                let timeout = arguments
-                    .get(2)
-                    .and_then(|argument| argument.value().as_u64())
-                    .unwrap_or(3000);
+                let timeout = unsigned_argument(arguments, 2).unwrap_or(3000);
                 network::probe(host, port, timeout, context)
             }
             ("sys.sample", Some(Argument::Target(Target::Local {}))) => {
-                let limit = arguments
-                    .get(1)
-                    .and_then(|argument| argument.value().as_u64())
+                let limit = unsigned_argument(arguments, 1)
                     .and_then(|value| usize::try_from(value).ok())
                     .ok_or_else(|| {
                         Error::new(ErrorCode::EArgType, "sys.sample requires an integer limit")
@@ -240,6 +232,13 @@ impl ActionProvider for CoreActions {
                 format!("Invalid target for {action}"),
             )),
         }
+    }
+}
+
+fn unsigned_argument(arguments: &[Argument], index: usize) -> Option<u64> {
+    match arguments.get(index) {
+        Some(Argument::Value(value)) => value.as_u64(),
+        _ => None,
     }
 }
 

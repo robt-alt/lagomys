@@ -21,6 +21,7 @@ pub enum ErrorCode {
     EBudget,
     EFieldMissing,
     EActionFailed,
+    ECancelled,
     EOutputLimit,
     EIo,
 }

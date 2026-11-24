@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use ops_actions::ActionContext;
+use ops_actions::{ActionContext, CancelSignal};
 use ops_spec::{
     Argument, Assertion, Error, ErrorCode, LoopContext, ObservedValue, RepeatReason, RepeatResult,
     RunResult, Status, Task, Value, MAX_DATA_BYTES,
@@ -21,11 +21,27 @@ use crate::expression::Evaluator;
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 const MAX_STORED_BYTES: usize = 16 * 1024 * 1024;
 
+pub struct ExecuteOptions {
+    pub started: Instant,
+    pub cancel: Option<CancelSignal>,
+}
+
 pub fn execute(plan: &ValidatedPlan<'_>) -> RunResult {
     execute_from(plan, Instant::now())
 }
 
 pub fn execute_from(plan: &ValidatedPlan<'_>, started: Instant) -> RunResult {
+    execute_with_options(
+        plan,
+        ExecuteOptions {
+            started,
+            cancel: None,
+        },
+    )
+}
+
+pub fn execute_with_options(plan: &ValidatedPlan<'_>, options: ExecuteOptions) -> RunResult {
+    let ExecuteOptions { started, cancel } = options;
     let mut result = RunResult::new();
     let Some(deadline) = started.checked_add(Duration::from_secs(plan.binding().budget.seconds))
     else {
@@ -38,6 +54,7 @@ pub fn execute_from(plan: &ValidatedPlan<'_>, started: Instant) -> RunResult {
     let mut run = Execution {
         plan,
         deadline,
+        cancel,
         result,
         values: BTreeMap::new(),
         stored_bytes: 0,
@@ -45,7 +62,7 @@ pub fn execute_from(plan: &ValidatedPlan<'_>, started: Instant) -> RunResult {
         evidence_names: Vec::new(),
         declared_evidence: BTreeSet::new(),
     };
-    if let Err(error) = run.block(plan.steps()) {
+    if let Err(error) = run.check_cancelled().and_then(|()| run.block(plan.steps())) {
         if let Some(path) = &error.path {
             run.result
                 .evidence
@@ -85,6 +102,7 @@ impl Stored {
 struct Execution<'a, 'plan> {
     plan: &'a ValidatedPlan<'plan>,
     deadline: Instant,
+    cancel: Option<CancelSignal>,
     result: RunResult,
     values: BTreeMap<String, Stored>,
     stored_bytes: usize,
@@ -120,15 +138,19 @@ impl<'a> Execution<'a, '_> {
 
     fn step(&mut self, step: &'a Step) -> Result<Flow, Error> {
         if !matches!(step.instruction, CheckedInstruction::Delay(_)) {
-            self.check_time()?;
+            self.check_active()?;
+        } else {
+            self.check_cancelled()?;
         }
         let result = match &step.instruction {
-            CheckedInstruction::Call { name, arguments } => self.call(name, arguments)?,
+            CheckedInstruction::Call { name, arguments } => {
+                self.call(name, arguments, step.line)?
+            }
             CheckedInstruction::Where { source, predicate } => {
                 let source = into_list(self.value(source)?)?;
                 let mut selected = Vec::new();
                 for item in source {
-                    self.check_time()?;
+                    self.check_active()?;
                     if Evaluator::new(&self.values, Some(&item)).evaluate(predicate)? {
                         selected.push(item);
                     }
@@ -142,7 +164,7 @@ impl<'a> Execution<'a, '_> {
             }
             CheckedInstruction::Wait { source, seconds } => {
                 if let Some(task) = self.task(source) {
-                    match self.wait(task, *seconds)? {
+                    match self.wait(task, *seconds, step.line)? {
                         Some(value) => value,
                         None => return Ok(Flow::Stop),
                     }
@@ -210,7 +232,7 @@ impl<'a> Execution<'a, '_> {
             CheckedInstruction::Continue => return Ok(Flow::Continue),
             CheckedInstruction::Delay(milliseconds) => {
                 let remaining = self.deadline.saturating_duration_since(Instant::now());
-                std::thread::sleep(Duration::from_millis(*milliseconds).min(remaining));
+                self.sleep(Duration::from_millis(*milliseconds).min(remaining))?;
                 if Instant::now() >= self.deadline {
                     if self.result.status != Status::Failed {
                         self.result.status = Status::Timeout;
@@ -250,7 +272,7 @@ impl<'a> Execution<'a, '_> {
         body: &'a [Step],
     ) -> Result<Option<RepeatResult>, Error> {
         for index in 0..count {
-            self.check_time()?;
+            self.check_active()?;
             if let Some(name) = context {
                 let current = LoopContext {
                     index,
@@ -291,9 +313,18 @@ impl<'a> Execution<'a, '_> {
         Ok(Stored::value(Value::Array(values)))
     }
 
-    fn call(&mut self, name: &str, operands: &[CheckedOperand]) -> Result<Stored, Error> {
+    fn call(
+        &mut self,
+        name: &str,
+        operands: &[Option<CheckedOperand>],
+        line: usize,
+    ) -> Result<Stored, Error> {
         let mut arguments = Vec::with_capacity(operands.len());
         for operand in operands {
+            let Some(operand) = operand else {
+                arguments.push(Argument::Omitted);
+                continue;
+            };
             let argument = match operand.kind {
                 CheckedValue::Target(index) => {
                     let target = self.plan.binding().targets.get(index).ok_or_else(|| {
@@ -308,7 +339,7 @@ impl<'a> Execution<'a, '_> {
             };
             arguments.push(argument);
         }
-        let result = self.invoke(name, &arguments, self.deadline)?;
+        let result = self.invoke(name, &arguments, self.deadline, line)?;
         let (signature, module) = self.plan.registry().signature(name).ok_or_else(|| {
             Error::new(ErrorCode::EUnknownAction, format!("Unknown action {name}"))
         })?;
@@ -339,26 +370,30 @@ impl<'a> Execution<'a, '_> {
         })
     }
 
-    fn wait(&mut self, task: Task, seconds: u64) -> Result<Option<Stored>, Error> {
+    fn wait(&mut self, task: Task, seconds: u64, line: usize) -> Result<Option<Stored>, Error> {
         let limit = Instant::now()
             .checked_add(Duration::from_secs(seconds))
             .map_or(self.deadline, |deadline| deadline.min(self.deadline));
         let argument = Argument::Value(task.id.clone());
         let status = loop {
+            if let Err(error) = self.check_cancelled() {
+                self.result.task = Some(task);
+                return Err(error);
+            }
             if Instant::now() >= limit {
                 break Status::Timeout;
             }
-            let observation = match self.invoke(&task.poll, std::slice::from_ref(&argument), limit)
-            {
-                Err(error) if error.code == ErrorCode::EBudget && Instant::now() >= limit => {
-                    break Status::Timeout;
-                }
-                Err(error) => {
-                    self.result.task = Some(task);
-                    return Err(error);
-                }
-                Ok(observation) => observation,
-            };
+            let observation =
+                match self.invoke(&task.poll, std::slice::from_ref(&argument), limit, line) {
+                    Err(error) if error.code == ErrorCode::EBudget && Instant::now() >= limit => {
+                        break Status::Timeout;
+                    }
+                    Err(error) => {
+                        self.result.task = Some(task);
+                        return Err(error);
+                    }
+                    Ok(observation) => observation,
+                };
             if Instant::now() >= limit {
                 break Status::Timeout;
             }
@@ -387,7 +422,10 @@ impl<'a> Execution<'a, '_> {
                 Some("pending") => break Status::Pending,
                 Some("running") => {
                     let remaining = limit.saturating_duration_since(Instant::now());
-                    std::thread::sleep(POLL_INTERVAL.min(remaining));
+                    if let Err(error) = self.sleep(POLL_INTERVAL.min(remaining)) {
+                        self.result.task = Some(task);
+                        return Err(error);
+                    }
                 }
                 _ => return Err(invalid_poll(&task)),
             }
@@ -420,25 +458,51 @@ impl<'a> Execution<'a, '_> {
         name: &str,
         arguments: &[Argument],
         deadline: Instant,
+        line: usize,
     ) -> Result<Value, Error> {
-        let context = ActionContext {
+        let sequence = self.result.usage.actions.saturating_add(1);
+        let context = ActionContext::new(
             deadline,
-            max_bytes: MAX_DATA_BYTES,
-        };
-        context.remaining()?;
+            MAX_DATA_BYTES,
+            sequence,
+            line,
+            self.cancel.clone(),
+        );
+        context.check_active()?;
         if self.result.usage.actions >= self.plan.binding().budget.actions {
             return Err(Error::new(
                 ErrorCode::EBudget,
                 "Action count budget exhausted",
             ));
         }
-        self.result.usage.actions += 1;
-        let result = self.plan.registry().invoke(name, arguments, &context)?;
+        self.result.usage.actions = sequence;
+        let result = self.plan.registry().invoke(name, arguments, &context);
+        self.check_cancelled()?;
+        let result = result?;
         context.remaining()?;
         Ok(result)
     }
 
-    fn check_time(&self) -> Result<(), Error> {
+    fn sleep(&self, duration: Duration) -> Result<(), Error> {
+        if let Some(cancel) = &self.cancel {
+            if cancel.wait_timeout(duration) {
+                return Err(cancelled());
+            }
+        } else {
+            std::thread::sleep(duration);
+        }
+        Ok(())
+    }
+
+    fn check_cancelled(&self) -> Result<(), Error> {
+        if self.cancel.as_ref().is_some_and(CancelSignal::is_cancelled) {
+            return Err(cancelled());
+        }
+        Ok(())
+    }
+
+    fn check_active(&self) -> Result<(), Error> {
+        self.check_cancelled()?;
         if Instant::now() < self.deadline {
             Ok(())
         } else {
@@ -497,6 +561,10 @@ impl<'a> Execution<'a, '_> {
         self.stored_bytes = total;
         Ok(())
     }
+}
+
+fn cancelled() -> Error {
+    Error::new(ErrorCode::ECancelled, "Execution cancelled")
 }
 
 fn check_storage(total: usize) -> Result<(), Error> {

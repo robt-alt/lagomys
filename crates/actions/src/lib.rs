@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+mod cancel;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     time::{Duration, Instant},
@@ -7,12 +9,44 @@ use std::{
 
 use ops_spec::{ActionSignature, Argument, Error, ErrorCode, Type, Value};
 
+pub use cancel::CancelSignal;
+
 pub struct ActionContext {
     pub deadline: Instant,
     pub max_bytes: usize,
+    pub sequence: u64,
+    pub line: usize,
+    cancel: Option<CancelSignal>,
 }
 
 impl ActionContext {
+    pub fn new(
+        deadline: Instant,
+        max_bytes: usize,
+        sequence: u64,
+        line: usize,
+        cancel: Option<CancelSignal>,
+    ) -> Self {
+        Self {
+            deadline,
+            max_bytes,
+            sequence,
+            line,
+            cancel,
+        }
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.as_ref().is_some_and(CancelSignal::is_cancelled)
+    }
+
+    pub fn check_active(&self) -> Result<(), Error> {
+        if self.is_cancelled() {
+            return Err(Error::new(ErrorCode::ECancelled, "Execution cancelled"));
+        }
+        self.remaining().map(|_| ())
+    }
+
     pub fn remaining(&self) -> Result<Duration, Error> {
         self.deadline
             .checked_duration_since(Instant::now())
@@ -133,7 +167,7 @@ impl Registry {
         arguments: &[Argument],
         context: &ActionContext,
     ) -> Result<Value, Error> {
-        context.remaining()?;
+        context.check_active()?;
         let (provider_index, signature_index) =
             self.indices.get(action).ok_or_else(|| unknown(action))?;
         let provider = self

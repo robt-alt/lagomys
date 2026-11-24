@@ -195,6 +195,7 @@ impl ActionProvider for McpProvider {
             .parameters
             .iter()
             .zip(arguments)
+            .filter(|(_, argument)| !matches!(argument, Argument::Omitted))
             .map(|(parameter, value)| (parameter.name.clone(), value.value()))
             .collect();
         let mut session = self

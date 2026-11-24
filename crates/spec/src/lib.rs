@@ -18,5 +18,5 @@ pub use result::{
 };
 pub use serde_json::Value;
 
-pub const VERSION: &str = "0.6";
+pub const VERSION: &str = "0.7";
 pub const MAX_DATA_BYTES: usize = 4 * 1024 * 1024;

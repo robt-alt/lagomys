@@ -379,6 +379,7 @@ fn render(parts: &[UrlPart], arguments: &[Argument]) -> Result<String, Error> {
             UrlPart::Parameter(index) => {
                 let value = arguments
                     .get(*index)
+                    .filter(|argument| !matches!(argument, Argument::Omitted))
                     .ok_or_else(|| invalid("Missing URL parameter"))?
                     .value();
                 let text = if let Value::String(text) = value {

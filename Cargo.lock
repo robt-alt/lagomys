@@ -149,6 +149,7 @@ version = "0.4.0"
 dependencies = [
  "ops-actions",
  "ops-spec",
+ "ops-syntax",
  "ops-validate",
  "serde",
  "serde_json",

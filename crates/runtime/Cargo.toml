@@ -12,3 +12,6 @@ ops-actions.workspace = true
 ops-validate.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+ops-syntax.workspace = true

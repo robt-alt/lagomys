@@ -5,10 +5,11 @@ use std::time::{Duration, Instant};
 
 use ops_actions::Registry;
 use ops_spec::{
-    Binding, Error, ErrorCode, LoopContext, Path, RepeatResult, TargetKind, Type, Value,
+    ActionSignature, Binding, Error, ErrorCode, LoopContext, Parameter, Path, RepeatResult,
+    TargetKind, Type, Value,
 };
 pub use ops_syntax::Comparison;
-use ops_syntax::{Expression, Instruction, Operand, OperandKind, Script, Statement};
+use ops_syntax::{CallArgument, Expression, Instruction, Operand, OperandKind, Script, Statement};
 
 pub struct ValidatedPlan<'a> {
     binding: &'a Binding,
@@ -41,7 +42,7 @@ pub struct Step {
 pub enum CheckedInstruction {
     Call {
         name: String,
-        arguments: Vec<CheckedOperand>,
+        arguments: Vec<Option<CheckedOperand>>,
     },
     Where {
         source: CheckedOperand,
@@ -352,46 +353,7 @@ impl Validator<'_> {
         let checked = match instruction {
             Instruction::Call { name, arguments } => {
                 let signature = registry.resolve(&name, &binding.modules)?;
-                signature.check_count(arguments.len())?;
-                let arguments = arguments
-                    .into_iter()
-                    .zip(&signature.parameters)
-                    .map(|(argument, parameter)| {
-                        let (argument, kind) =
-                            check_value(argument, results, None, false, parameter.target, binding)
-                                .map_err(|error| error.action(&name))?;
-                        let valid = match &argument.kind {
-                            CheckedValue::Literal(value) => parameter.value_type.accepts(value),
-                            CheckedValue::Target(index) => {
-                                binding.targets.get(*index).is_some_and(|target| {
-                                    parameter.value_type.accepts(&target.value())
-                                })
-                            }
-                            _ => parameter.value_type.compatible(&kind),
-                        };
-                        if !valid {
-                            let actual = match &argument.kind {
-                                CheckedValue::Target(index) => binding
-                                    .targets
-                                    .get(*index)
-                                    .map_or(kind.name(), |target| Type::of(&target.value()).name()),
-                                _ => kind.name(),
-                            };
-                            return Err(Error::new(
-                                ErrorCode::EArgType,
-                                format!(
-                                    "Parameter {} of {name} requires {}",
-                                    parameter.name,
-                                    parameter.value_type.name()
-                                ),
-                            )
-                            .action(&name)
-                            .expected(parameter.value_type.name())
-                            .actual(actual));
-                        }
-                        Ok(argument)
-                    })
-                    .collect::<Result<Vec<_>, Error>>()?;
+                let arguments = check_call_arguments(arguments, signature, results, binding)?;
                 if let Some(poll) = &signature.poll {
                     let poll_signature = registry.resolve(poll, &binding.modules)?;
                     if registry.signature(&name).and_then(|(_, module)| module)
@@ -646,6 +608,128 @@ impl Validator<'_> {
             Type::Null,
         ))
     }
+}
+
+fn check_call_arguments(
+    arguments: Vec<CallArgument>,
+    signature: &ActionSignature,
+    results: &BTreeMap<String, Type>,
+    binding: &Binding,
+) -> Result<Vec<Option<CheckedOperand>>, Error> {
+    let parameters = &signature.parameters;
+    let positional_count = arguments
+        .iter()
+        .filter(|argument| matches!(argument, CallArgument::Positional(_)))
+        .count();
+    if positional_count > parameters.len() {
+        signature.check_count(positional_count)?;
+    }
+
+    let mut slots = vec![None; parameters.len()];
+    let mut position = 0;
+    for argument in arguments {
+        let (index, operand) = match argument {
+            CallArgument::Positional(operand) => {
+                let index = position;
+                position += 1;
+                (index, operand)
+            }
+            CallArgument::Named { name, operand } => {
+                let index = parameters
+                    .iter()
+                    .position(|parameter| parameter.name == name)
+                    .ok_or_else(|| {
+                        Error::new(
+                            ErrorCode::EArgType,
+                            format!("Unknown parameter {name} for action {}", signature.name),
+                        )
+                        .action(&signature.name)
+                        .available(
+                            parameters
+                                .iter()
+                                .map(|parameter| parameter.name.clone())
+                                .collect(),
+                        )
+                    })?;
+                (index, operand)
+            }
+        };
+        let slot = &mut slots[index];
+        if slot.is_some() {
+            return Err(Error::new(
+                ErrorCode::EArgType,
+                format!(
+                    "Parameter {} for action {} was supplied more than once",
+                    parameters[index].name, signature.name
+                ),
+            )
+            .action(&signature.name));
+        }
+        *slot = Some(operand);
+    }
+    for (parameter, operand) in parameters.iter().zip(&slots) {
+        if parameter.required && operand.is_none() {
+            return Err(signature.missing_argument(parameter));
+        }
+    }
+    slots.truncate(
+        slots
+            .iter()
+            .rposition(Option::is_some)
+            .map_or(0, |index| index + 1),
+    );
+    slots
+        .into_iter()
+        .zip(parameters)
+        .map(|(operand, parameter)| {
+            operand
+                .map(|operand| {
+                    check_call_operand(operand, parameter, &signature.name, results, binding)
+                })
+                .transpose()
+        })
+        .collect()
+}
+
+fn check_call_operand(
+    operand: Operand,
+    parameter: &Parameter,
+    action: &str,
+    results: &BTreeMap<String, Type>,
+    binding: &Binding,
+) -> Result<CheckedOperand, Error> {
+    let (argument, kind) = check_value(operand, results, None, false, parameter.target, binding)
+        .map_err(|error| error.action(action))?;
+    let (valid, actual) = match &argument.kind {
+        CheckedValue::Literal(value) => (parameter.value_type.accepts(value), kind.name()),
+        CheckedValue::Target(index) => {
+            binding
+                .targets
+                .get(*index)
+                .map_or((false, kind.name()), |target| {
+                    let value = target.value();
+                    (
+                        parameter.value_type.accepts(&value),
+                        Type::of(&value).name(),
+                    )
+                })
+        }
+        _ => (parameter.value_type.compatible(&kind), kind.name()),
+    };
+    if !valid {
+        return Err(Error::new(
+            ErrorCode::EArgType,
+            format!(
+                "Parameter {} of {action} requires {}",
+                parameter.name,
+                parameter.value_type.name()
+            ),
+        )
+        .action(action)
+        .expected(parameter.value_type.name())
+        .actual(actual));
+    }
+    Ok(argument)
 }
 
 fn integer(operand: Operand, message: &str) -> Result<u64, Error> {

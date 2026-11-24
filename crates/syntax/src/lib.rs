@@ -5,7 +5,7 @@ mod lexer;
 use std::collections::BTreeMap;
 
 use lexer::{Token, TokenKind};
-use ops_spec::{Error, ErrorCode, Path, Segment, Value};
+use ops_spec::{is_name, Error, ErrorCode, Path, Segment, Value};
 
 pub const MAX_SOURCE_BYTES: usize = 256 * 1024;
 const MAX_DEPTH: usize = 64;
@@ -36,7 +36,7 @@ pub struct Statement {
 pub enum Instruction {
     Call {
         name: String,
-        arguments: Vec<Operand>,
+        arguments: Vec<CallArgument>,
     },
     Where {
         source: Operand,
@@ -72,6 +72,12 @@ pub enum Instruction {
     Collect(Vec<Operand>),
     Evidence(Vec<String>),
     Unknown(String),
+}
+
+#[derive(Debug)]
+pub enum CallArgument {
+    Positional(Operand),
+    Named { name: String, operand: Operand },
 }
 
 #[derive(Clone, Debug)]
@@ -564,8 +570,43 @@ impl LineParser<'_> {
         let action = self.word("Expected an action name")?;
         Ok(Instruction::Call {
             name: format!("{namespace}.{action}"),
-            arguments: self.arguments()?,
+            arguments: self.call_arguments()?,
         })
+    }
+
+    fn call_arguments(&mut self) -> Result<Vec<CallArgument>, Error> {
+        let mut arguments = Vec::new();
+        let mut seen_named = false;
+        while let Some(token) = self.tokens.get(self.at) {
+            self.space()?;
+            if let Some(assign) = self
+                .tokens
+                .get(self.at + 1)
+                .filter(|token| token.kind == TokenKind::Assign)
+            {
+                let name = &self.source[token.start..token.end];
+                if !is_name(name) {
+                    return Err(self.error("Expected a parameter name before ="));
+                }
+                if token.end != assign.start
+                    || self.tokens.get(self.at + 2).map(|token| token.start) != Some(assign.end)
+                {
+                    return Err(self.error("Named arguments require name=value with no spaces"));
+                }
+                self.at += 2;
+                arguments.push(CallArgument::Named {
+                    name: name.to_owned(),
+                    operand: self.operand()?,
+                });
+                seen_named = true;
+            } else {
+                if seen_named {
+                    return Err(self.error("Positional arguments must precede named arguments"));
+                }
+                arguments.push(CallArgument::Positional(self.operand()?));
+            }
+        }
+        Ok(arguments)
     }
 
     fn arguments(&mut self) -> Result<Vec<Operand>, Error> {

@@ -148,10 +148,30 @@ impl ActionSignature {
         }
     }
 
+    pub fn missing_argument(&self, parameter: &Parameter) -> Error {
+        Error::new(
+            ErrorCode::EArgCount,
+            format!(
+                "Missing required parameter {} for action {}",
+                parameter.name, self.name
+            ),
+        )
+        .action(&self.name)
+    }
+
     pub fn check_arguments(&self, arguments: &[Argument]) -> Result<(), Error> {
-        self.check_count(arguments.len())?;
+        if arguments.len() > self.parameters.len() {
+            return self.check_count(arguments.len());
+        }
+        for (index, parameter) in self.parameters.iter().enumerate() {
+            if parameter.required && matches!(arguments.get(index), None | Some(Argument::Omitted))
+            {
+                return Err(self.missing_argument(parameter));
+            }
+        }
         for (parameter, argument) in self.parameters.iter().zip(arguments) {
             match (parameter.target, argument) {
+                (_, Argument::Omitted) => {}
                 (Some(kind), Argument::Target(target))
                     if kind == target.kind() && parameter.value_type.accepts(&target.value()) => {}
                 (Some(kind), _) => {
@@ -195,6 +215,7 @@ impl ActionSignature {
 pub enum Argument {
     Target(Target),
     Value(Value),
+    Omitted,
 }
 
 impl Argument {
@@ -202,6 +223,7 @@ impl Argument {
         match self {
             Self::Target(target) => target.value(),
             Self::Value(value) => value.clone(),
+            Self::Omitted => Value::Null,
         }
     }
 }
