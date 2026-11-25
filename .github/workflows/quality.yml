@@ -31,3 +31,13 @@ jobs:
       - run: cargo +stable clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo +stable build --release --locked
       - run: python3 scripts/check_size.py target/release/lagomys
+
+  wasm:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal
+      - run: rustup target add --toolchain stable wasm32-wasip1
+      - run: >-
+          cargo +stable build --target wasm32-wasip1 --release --locked
+          -p ops-spec -p ops-syntax -p ops-actions -p ops-validate -p ops-runtime

@@ -1,11 +1,11 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::Value;
 
 pub const MAX_AVAILABLE_FIELDS: usize = 20;
 pub const MAX_DETAIL_BYTES: usize = 1024;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ErrorCode {
     EParse,
@@ -26,13 +26,13 @@ pub enum ErrorCode {
     EIo,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AvailableFields {
     pub names: Vec<String>,
     pub total: usize,
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Diagnostics {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action: Option<String>,
@@ -46,7 +46,7 @@ pub struct Diagnostics {
     pub detail: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Error {
     pub code: ErrorCode,
     pub message: String,
@@ -59,8 +59,25 @@ pub struct Error {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub module_code: Option<Box<Value>>,
     // Boxed so the common Result<_, Error> path stays small; flatten keeps the wire format flat.
-    #[serde(flatten)]
+    #[serde(flatten, deserialize_with = "deserialize_diagnostics")]
     pub diagnostics: Option<Box<Diagnostics>>,
+}
+
+fn deserialize_diagnostics<'de, D>(deserializer: D) -> Result<Option<Box<Diagnostics>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // Flattening presents an empty map when no diagnostic fields are present.
+    match Diagnostics::deserialize(deserializer)? {
+        Diagnostics {
+            action: None,
+            expected: None,
+            actual: None,
+            available: None,
+            detail: None,
+        } => Ok(None),
+        diagnostics => Ok(Some(Box::new(diagnostics))),
+    }
 }
 
 impl Error {
