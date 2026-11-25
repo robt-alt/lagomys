@@ -26,6 +26,21 @@ pub struct ExecuteOptions {
     pub cancel: Option<CancelSignal>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WaitOutcome {
+    Elapsed,
+    Cancelled,
+}
+
+/// Optional host-provided blocking wait hook used by `delay` and `wait`.
+///
+/// Implementations must check cancellation before sleeping (including when
+/// `duration` is zero), prefer `Cancelled` if cancellation and expiry coincide,
+/// and avoid returning `Elapsed` prematurely on spurious wakeups.
+pub trait Waiter {
+    fn wait(&self, duration: Duration) -> WaitOutcome;
+}
+
 pub fn execute(plan: &ValidatedPlan<'_>) -> RunResult {
     execute_from(plan, Instant::now())
 }
@@ -41,6 +56,22 @@ pub fn execute_from(plan: &ValidatedPlan<'_>, started: Instant) -> RunResult {
 }
 
 pub fn execute_with_options(plan: &ValidatedPlan<'_>, options: ExecuteOptions) -> RunResult {
+    execute_internal(plan, options, None)
+}
+
+pub fn execute_with_waiter(
+    plan: &ValidatedPlan<'_>,
+    options: ExecuteOptions,
+    waiter: &dyn Waiter,
+) -> RunResult {
+    execute_internal(plan, options, Some(waiter))
+}
+
+fn execute_internal<'a, 'w>(
+    plan: &'a ValidatedPlan<'_>,
+    options: ExecuteOptions,
+    waiter: Option<&'w (dyn Waiter + 'w)>,
+) -> RunResult {
     let ExecuteOptions { started, cancel } = options;
     let mut result = RunResult::new();
     let Some(deadline) = started.checked_add(Duration::from_secs(plan.binding().budget.seconds))
@@ -55,6 +86,7 @@ pub fn execute_with_options(plan: &ValidatedPlan<'_>, options: ExecuteOptions) -
         plan,
         deadline,
         cancel,
+        waiter,
         result,
         values: BTreeMap::new(),
         stored_bytes: 0,
@@ -99,10 +131,11 @@ impl Stored {
     }
 }
 
-struct Execution<'a, 'plan> {
+struct Execution<'a, 'w, 'plan> {
     plan: &'a ValidatedPlan<'plan>,
     deadline: Instant,
     cancel: Option<CancelSignal>,
+    waiter: Option<&'w (dyn Waiter + 'w)>,
     result: RunResult,
     values: BTreeMap<String, Stored>,
     stored_bytes: usize,
@@ -119,7 +152,7 @@ enum Flow {
     Stop,
 }
 
-impl<'a> Execution<'a, '_> {
+impl<'a> Execution<'a, '_, '_> {
     fn block(&mut self, steps: &'a [Step]) -> Result<Flow, Error> {
         for step in steps {
             let flow = self.step(step).map_err(|error| {
@@ -231,9 +264,11 @@ impl<'a> Execution<'a, '_> {
             CheckedInstruction::Break => return Ok(Flow::Break),
             CheckedInstruction::Continue => return Ok(Flow::Continue),
             CheckedInstruction::Delay(milliseconds) => {
+                let requested = Duration::from_millis(*milliseconds);
                 let remaining = self.deadline.saturating_duration_since(Instant::now());
-                self.sleep(Duration::from_millis(*milliseconds).min(remaining))?;
-                if Instant::now() >= self.deadline {
+                let clamped = requested >= remaining;
+                self.sleep(requested.min(remaining))?;
+                if clamped || Instant::now() >= self.deadline {
                     if self.result.status != Status::Failed {
                         self.result.status = Status::Timeout;
                     }
@@ -422,9 +457,13 @@ impl<'a> Execution<'a, '_> {
                 Some("pending") => break Status::Pending,
                 Some("running") => {
                     let remaining = limit.saturating_duration_since(Instant::now());
+                    let clamped = remaining <= POLL_INTERVAL;
                     if let Err(error) = self.sleep(POLL_INTERVAL.min(remaining)) {
                         self.result.task = Some(task);
                         return Err(error);
+                    }
+                    if clamped {
+                        break Status::Timeout;
                     }
                 }
                 _ => return Err(invalid_poll(&task)),
@@ -484,6 +523,18 @@ impl<'a> Execution<'a, '_> {
     }
 
     fn sleep(&self, duration: Duration) -> Result<(), Error> {
+        self.check_cancelled()?;
+        if let Some(waiter) = self.waiter {
+            return match waiter.wait(duration) {
+                WaitOutcome::Elapsed => self.check_cancelled(),
+                WaitOutcome::Cancelled => {
+                    if let Some(cancel) = &self.cancel {
+                        cancel.cancel();
+                    }
+                    Err(cancelled())
+                }
+            };
+        }
         if let Some(cancel) = &self.cancel {
             if cancel.wait_timeout(duration) {
                 return Err(cancelled());
